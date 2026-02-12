@@ -1,0 +1,224 @@
+import asyncio
+import hashlib
+import hmac
+import json
+import os
+import re
+from collections import defaultdict
+
+import anthropic
+import discord
+from aiohttp import web
+from discord.ext import commands
+
+import config
+
+PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
+DEPLOY_SIGNAL: str = os.path.join(PROJECT_DIR, ".deploy")
+STATUS_FILE: str = os.path.join(PROJECT_DIR, ".status")
+MAX_HISTORY: int = 20
+DISCORD_MSG_LIMIT: int = 2000
+
+# ---------------------------------------------------------------------------
+# Discord bot setup
+# ---------------------------------------------------------------------------
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+claude = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+channel_history: dict[int, list[dict[str, str]]] = defaultdict(list)
+
+
+async def log_to_admin(msg: str) -> None:
+    """Send a message to the designated admin/log channel."""
+    channel = bot.get_channel(config.LOG_CHANNEL_ID)
+    if channel and isinstance(channel, discord.abc.Messageable):
+        try:
+            await channel.send(msg)
+        except Exception as e:
+            print(f"Failed to send to admin channel: {e}")
+
+
+@bot.event
+async def on_ready() -> None:
+    print(f"Turbot is online as {bot.user} — feeling Turbotastic!")
+
+    # Check if the supervisor left a status message for us
+    if os.path.exists(STATUS_FILE):
+        try:
+            with open(STATUS_FILE, encoding="utf-8") as f:
+                status: dict[str, str] = json.load(f)
+            os.remove(STATUS_FILE)
+
+            event = status.get("event")
+            if event == "deploy_success":
+                commit = status.get("commit", "unknown")
+                await log_to_admin(
+                    f"**Deploy successful** — now running `{commit[:8]}`. "
+                    f"Feeling Turbotastic!"
+                )
+            elif event == "rollback":
+                bad_commit = status.get("bad_commit", "unknown")
+                good_commit = status.get("good_commit", "unknown")
+                await log_to_admin(
+                    f"**Rolled back!** Commit `{bad_commit[:8]}` crashed within "
+                    f"30s. Reverted to `{good_commit[:8]}`. "
+                    f"Could use some help looking into this one."
+                )
+            elif event == "deploy_pull_failed":
+                error = status.get("error", "unknown")
+                good_commit = status.get("good_commit", "unknown")
+                await log_to_admin(
+                    f"**Deploy failed** during git pull/install: {error}\n"
+                    f"Rolled back to `{good_commit[:8]}`. "
+                    f"Might need a human to take a look."
+                )
+            elif event == "restart":
+                await log_to_admin(
+                    "**Restarted** after an unexpected crash. "
+                    "Keeping an eye on things."
+                )
+        except Exception as e:
+            print(f"Error reading status file: {e}")
+    else:
+        await log_to_admin("**Turbot is online!** Ready and Turbotastic.")
+
+
+@bot.event
+async def on_message(message: discord.Message) -> None:
+    if message.author.bot:
+        return
+
+    # Let cogs and commands process first
+    await bot.process_commands(message)
+
+    # Only respond to @mentions
+    if not bot.user or bot.user not in message.mentions:
+        return
+
+    # Skip feature requests — handled by the cog
+    text = re.sub(r"<@!?\d+>", "", message.content).strip()
+    if text.lower().startswith(("feature request:", "bot improvement:")):
+        return
+
+    # Build conversation history for this channel
+    history = channel_history[message.channel.id]
+    history.append({"role": "user", "content": text})
+    if len(history) > MAX_HISTORY:
+        history[:] = history[-MAX_HISTORY:]
+
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=1024,
+            system=(
+                "You are Turbot, a friendly and helpful Discord bot. "
+                "You are Turbotastic — cheerful, concise, and occasionally "
+                "make fish puns. Keep replies under a few paragraphs."
+            ),
+            messages=list(history),
+        )
+        reply = response.content[0].text
+
+        history.append({"role": "assistant", "content": reply})
+        if len(history) > MAX_HISTORY:
+            history[:] = history[-MAX_HISTORY:]
+
+        # Split long replies to respect Discord's 2000-char limit
+        while reply:
+            chunk, reply = reply[:DISCORD_MSG_LIMIT], reply[DISCORD_MSG_LIMIT:]
+            await message.reply(chunk)
+
+    except Exception as e:
+        await message.reply(f"Blub... something went wrong: {e}")
+        await log_to_admin(f"**Chat error** in <#{message.channel.id}>: {e}")
+
+
+# ---------------------------------------------------------------------------
+# GitHub webhook server (aiohttp)
+# ---------------------------------------------------------------------------
+
+def _verify_signature(payload: bytes, signature: str) -> bool:
+    expected = "sha256=" + hmac.new(
+        config.WEBHOOK_SECRET.encode(),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+async def webhook_handler(request: web.Request) -> web.Response:
+    payload = await request.read()
+
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not _verify_signature(payload, signature):
+        await log_to_admin("**Webhook rejected** — invalid signature.")
+        return web.Response(status=401, text="Invalid signature")
+
+    event = request.headers.get("X-GitHub-Event", "")
+    if event != "pull_request":
+        return web.Response(text="Ignored event")
+
+    data: dict[str, object] = json.loads(payload)
+    if data.get("action") == "closed" and data.get("pull_request", {}).get("merged"):
+        pr = data["pull_request"]
+        pr_title = pr.get("title", "unknown")
+        pr_url = pr.get("html_url", "")
+        await log_to_admin(
+            f"**PR merged** — [{pr_title}]({pr_url})\n"
+            f"Shutting down for deploy. Be right back!"
+        )
+        with open(DEPLOY_SIGNAL, "w", encoding="utf-8") as f:
+            f.write("deploy")
+        # Give a moment for the message to send and response to flush
+        asyncio.get_running_loop().call_later(2, _graceful_exit)
+
+    return web.Response(text="OK")
+
+
+def _graceful_exit() -> None:
+    os._exit(0)
+
+
+async def start_webhook_server() -> web.AppRunner:
+    app = web.Application()
+    app.router.add_post("/webhook", webhook_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", config.WEBHOOK_PORT)
+    await site.start()
+    print(f"Webhook server listening on port {config.WEBHOOK_PORT}")
+    return runner
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+async def main() -> None:
+    runner = await start_webhook_server()
+
+    # Load the feature request cog
+    await bot.load_extension("cog_feature")
+
+    # Auto-load plugins
+    plugins_dir = os.path.join(PROJECT_DIR, "plugins")
+    if os.path.isdir(plugins_dir):
+        for filename in sorted(os.listdir(plugins_dir)):
+            if filename.endswith(".py") and filename != "__init__.py":
+                ext_name = f"plugins.{filename[:-3]}"
+                try:
+                    await bot.load_extension(ext_name)
+                except Exception as e:
+                    print(f"Failed to load plugin {ext_name}: {e}")
+
+    try:
+        await bot.start(config.DISCORD_TOKEN)
+    finally:
+        await runner.cleanup()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
