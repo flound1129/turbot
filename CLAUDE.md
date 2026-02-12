@@ -80,6 +80,7 @@ data/               — Plugin storage (created automatically, per-plugin isolat
 - Run with: `source .venv/bin/activate && pytest tests/`
 - Use `unittest.mock` to mock Discord, Claude API, git subprocess calls
 - Tests must not require any external services or env vars
+- **IMPORTANT: Always run the full test suite and verify all tests pass BEFORE committing and pushing, never after.**
 
 ## API Resilience
 
