@@ -129,6 +129,11 @@ Tests use `unittest.mock` and require no external services or environment variab
 - All generated code goes through PR review — human approval required before merge
 - Plugin storage is isolated per-plugin
 
+## Legal
+
+- [Terms of Service](TERMS_OF_SERVICE.md)
+- [Privacy Policy](PRIVACY_POLICY.md)
+
 ## License
 
-All rights reserved.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
