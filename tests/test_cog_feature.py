@@ -209,7 +209,7 @@ class TestFeatureRequestCog:
 
         with (
             patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
-            patch.object(cog.client.messages, "create", return_value=claude_response),
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
             patch.object(cog_feature, "_read_plugin_context", return_value={"plugin_api.py": "# api"}),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
             patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
@@ -249,7 +249,7 @@ class TestFeatureRequestCog:
 
         with (
             patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
-            patch.object(cog.client.messages, "create", return_value=claude_response),
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
             patch.object(cog_feature, "_read_project_files", return_value={"bot.py": "# bot"}),
             patch.object(cog_feature, "_log", new_callable=AsyncMock) as mock_log,
             patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
@@ -288,7 +288,7 @@ class TestPolicyViolationRejectspr:
         }))]
 
         with (
-            patch.object(cog.client.messages, "create", return_value=claude_response),
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
             patch.object(cog_feature, "_read_plugin_context", return_value={}),
             patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
             patch("github_ops.create_branch", new_callable=AsyncMock) as mock_branch,
@@ -322,7 +322,7 @@ class TestCoreChangeFlag:
         }))]
 
         with (
-            patch.object(cog.client.messages, "create", return_value=claude_response),
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
             patch.object(cog_feature, "_read_project_files", return_value={"bot.py": "# bot"}),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
             patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
@@ -461,7 +461,7 @@ class TestCogCircuitBreaker:
 
         with (
             patch("cog_feature.claude_health", health),
-            patch.object(cog.client.messages, "create", return_value=claude_response),
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
             patch.object(cog_feature, "_read_plugin_context", return_value={}),
             patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
@@ -491,7 +491,7 @@ class TestCogCircuitBreaker:
             patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(
                 cog.client.messages, "create",
-                side_effect=anthropic.APITimeoutError(request=None),
+                new_callable=AsyncMock, side_effect=anthropic.APITimeoutError(request=None),
             ),
             patch.object(cog_feature, "_read_plugin_context", return_value={}),
             patch.object(cog_feature, "_load_security_policy", return_value="# policy"),

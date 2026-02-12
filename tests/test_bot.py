@@ -137,8 +137,8 @@ class TestWebhookHandler:
 class TestChannelHistory:
     def test_history_is_per_channel(self) -> None:
         bot.channel_history.clear()
-        bot.channel_history[1].append({"role": "user", "content": "hi"})
-        bot.channel_history[2].append({"role": "user", "content": "hello"})
+        bot.channel_history[1] = [{"role": "user", "content": "hi"}]
+        bot.channel_history[2] = [{"role": "user", "content": "hello"}]
         assert len(bot.channel_history[1]) == 1
         assert len(bot.channel_history[2]) == 1
         assert bot.channel_history[1][0]["content"] == "hi"
@@ -146,6 +146,7 @@ class TestChannelHistory:
 
     def test_history_truncation(self) -> None:
         bot.channel_history.clear()
+        bot.channel_history[99] = []
         history = bot.channel_history[99]
         for i in range(30):
             history.append({"role": "user", "content": f"msg {i}"})
@@ -154,6 +155,19 @@ class TestChannelHistory:
             history[:] = history[-bot.MAX_HISTORY:]
         assert len(history) == bot.MAX_HISTORY
         assert history[0]["content"] == "msg 10"
+
+    def test_lru_eviction(self) -> None:
+        bot.channel_history.clear()
+        for i in range(bot.MAX_CHANNELS + 10):
+            bot.channel_history[i] = [{"role": "user", "content": "hi"}]
+        # Evict oldest (simulating the eviction logic from on_message)
+        while len(bot.channel_history) > bot.MAX_CHANNELS:
+            bot.channel_history.popitem(last=False)
+        assert len(bot.channel_history) == bot.MAX_CHANNELS
+        # Oldest channels (0-9) should be evicted
+        assert 0 not in bot.channel_history
+        assert 9 not in bot.channel_history
+        assert 10 in bot.channel_history
 
 
 class TestLogToAdmin:
@@ -236,7 +250,7 @@ class TestChatCircuitBreaker:
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create") as mock_create,
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
         ):
             await bot.on_message(message)
 
@@ -257,7 +271,7 @@ class TestChatCircuitBreaker:
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", return_value=mock_response),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
             await bot.on_message(message)
@@ -278,7 +292,7 @@ class TestChatCircuitBreaker:
             patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
             patch.object(
                 bot.claude.messages, "create",
-                side_effect=anthropic.APITimeoutError(request=None),
+                new_callable=AsyncMock, side_effect=anthropic.APITimeoutError(request=None),
             ),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
@@ -304,7 +318,7 @@ class TestChatCircuitBreaker:
             patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
             patch.object(
                 bot.claude.messages, "create",
-                side_effect=anthropic.AuthenticationError(
+                new_callable=AsyncMock, side_effect=anthropic.AuthenticationError(
                     message="Invalid key", response=mock_resp, body=None,
                 ),
             ),
@@ -334,7 +348,7 @@ class TestChatCircuitBreaker:
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", return_value=mock_response),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
         ):
             await bot.on_message(message)

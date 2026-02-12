@@ -151,7 +151,7 @@ class FeatureRequestCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.client = anthropic.Anthropic(
+        self.client = anthropic.AsyncAnthropic(
             api_key=config.ANTHROPIC_API_KEY,
             timeout=anthropic.Timeout(connect=5.0, read=90.0, write=5.0, pool=10.0),
         )
@@ -253,7 +253,7 @@ class FeatureRequestCog(commands.Cog):
         for path, content in sorted(codebase.items()):
             codebase_text += f"\n--- {path} ---\n{content}\n"
 
-        response = self.client.messages.create(
+        response = await self.client.messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=4096,
             system=system_prompt,
@@ -301,7 +301,8 @@ class FeatureRequestCog(commands.Cog):
 
         branch = await github_ops.create_branch(description[:40])
         github_ops.apply_changes(changes)
-        await github_ops.commit_and_push(branch, summary)
+        changed_paths = [change["path"] for change in changes]
+        await github_ops.commit_and_push(branch, summary, paths=changed_paths)
         pr_url = await github_ops.open_pr(branch, title, pr_body)
 
         # Return to main so the working tree is clean for the bot

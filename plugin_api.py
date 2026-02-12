@@ -20,6 +20,14 @@ HTTP_TIMEOUT: aiohttp.ClientTimeout = aiohttp.ClientTimeout(total=10)
 DATA_DIR: str = os.path.join(PROJECT_DIR, "data")
 
 
+def _validate_store_key(key: str) -> None:
+    """Reject store keys that could escape the plugin's data directory."""
+    if os.sep in key or (os.altsep and os.altsep in key) or "/" in key or "\\" in key:
+        raise ValueError(f"Invalid store key: {key!r}")
+    if key in (".", "..") or key.startswith("."):
+        raise ValueError(f"Invalid store key: {key!r}")
+
+
 class PluginContext:
     """Safe wrapper around the bot — only exposes approved operations."""
 
@@ -27,6 +35,19 @@ class PluginContext:
         self._bot = bot
         self._plugin_name = plugin_name
         self._store_dir = os.path.join(DATA_DIR, plugin_name)
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Return a shared aiohttp session, creating one if needed."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def close(self) -> None:
+        """Close the shared HTTP session. Called on plugin unload."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     async def send_to_channel(self, channel_id: int, content: str) -> None:
         """Send a message to a channel (truncated to 2000 chars)."""
@@ -37,14 +58,14 @@ class PluginContext:
     async def http_get(self, url: str, **kwargs: Any) -> aiohttp.ClientResponse:
         """Perform an HTTP GET request via aiohttp."""
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
-        async with aiohttp.ClientSession() as session:
-            return await session.get(url, **kwargs)
+        session = await self._get_session()
+        return await session.get(url, **kwargs)
 
     async def http_post(self, url: str, **kwargs: Any) -> aiohttp.ClientResponse:
         """Perform an HTTP POST request via aiohttp."""
         kwargs.setdefault("timeout", HTTP_TIMEOUT)
-        async with aiohttp.ClientSession() as session:
-            return await session.post(url, **kwargs)
+        session = await self._get_session()
+        return await session.post(url, **kwargs)
 
     @property
     def guilds(self) -> list[discord.Guild]:
@@ -57,6 +78,7 @@ class PluginContext:
 
     def store_get(self, key: str) -> Any:
         """Read a value from the plugin's isolated JSON store."""
+        _validate_store_key(key)
         path = os.path.join(self._store_dir, f"{key}.json")
         if not os.path.exists(path):
             return None
@@ -65,6 +87,7 @@ class PluginContext:
 
     def store_set(self, key: str, value: Any) -> None:
         """Write a JSON-serializable value to the plugin's isolated store."""
+        _validate_store_key(key)
         os.makedirs(self._store_dir, exist_ok=True)
         path = os.path.join(self._store_dir, f"{key}.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -91,6 +114,7 @@ class TurbotPlugin(commands.Cog):
 
     async def cog_unload(self) -> None:
         """Called by discord.py when the cog is unloaded."""
+        await self.turbot.close()
         if hasattr(self, "plugin_unload"):
             await self.plugin_unload()
 

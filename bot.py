@@ -4,7 +4,7 @@ import hmac
 import json
 import os
 import re
-from collections import defaultdict
+from collections import OrderedDict
 
 import anthropic
 import discord
@@ -28,11 +28,12 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-claude = anthropic.Anthropic(
+claude = anthropic.AsyncAnthropic(
     api_key=config.ANTHROPIC_API_KEY,
     timeout=anthropic.Timeout(connect=5.0, read=30.0, write=5.0, pool=10.0),
 )
-channel_history: dict[int, list[dict[str, str]]] = defaultdict(list)
+channel_history: OrderedDict[int, list[dict[str, str]]] = OrderedDict()
+MAX_CHANNELS: int = 200
 
 
 async def log_to_admin(msg: str) -> None:
@@ -107,12 +108,6 @@ async def on_message(message: discord.Message) -> None:
     if text.lower().startswith(("feature request:", "bot improvement:")):
         return
 
-    # Build conversation history for this channel
-    history = channel_history[message.channel.id]
-    history.append({"role": "user", "content": text})
-    if len(history) > MAX_HISTORY:
-        history[:] = history[-MAX_HISTORY:]
-
     if not claude_health.available:
         await message.reply(
             "The Claude API is currently unreachable, so I can't chat right now. "
@@ -120,10 +115,22 @@ async def on_message(message: discord.Message) -> None:
         )
         return
 
+    # Build conversation history for this channel (after circuit check so
+    # rejected messages don't create dangling user turns in the history)
+    history = channel_history.setdefault(message.channel.id, [])
+    channel_history.move_to_end(message.channel.id)
+    history.append({"role": "user", "content": text})
+    if len(history) > MAX_HISTORY:
+        history[:] = history[-MAX_HISTORY:]
+
+    # Evict oldest channels if too many are tracked
+    while len(channel_history) > MAX_CHANNELS:
+        channel_history.popitem(last=False)
+
     was_recovering = claude_health.state == "half_open"
 
     try:
-        response = claude.messages.create(
+        response = await claude.messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=1024,
             system=(

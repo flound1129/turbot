@@ -61,8 +61,13 @@ def apply_changes(changes: list[dict[str, str]]) -> None:
                 os.remove(path)
 
 
-async def commit_and_push(branch: str, message: str) -> None:
-    await _run(["git", "add", "-A"])
+async def commit_and_push(
+    branch: str, message: str, paths: list[str] | None = None,
+) -> None:
+    if paths:
+        await _run(["git", "add", "--"] + paths)
+    else:
+        await _run(["git", "add", "-A"])
     await _run(["git", "commit", "-m", message])
     await _run(["git", "push", "-u", "origin", branch])
 

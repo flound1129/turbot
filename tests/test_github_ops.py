@@ -120,11 +120,25 @@ class TestCreateBranch:
 
 class TestCommitAndPush:
     @pytest.mark.asyncio
-    async def test_adds_commits_and_pushes(self) -> None:
+    async def test_adds_all_commits_and_pushes(self) -> None:
         with patch.object(github_ops, "_run", new_callable=AsyncMock) as mock_run:
             await github_ops.commit_and_push("feature/test", "test commit")
             assert mock_run.call_count == 3
             mock_run.assert_any_call(["git", "add", "-A"])
+            mock_run.assert_any_call(["git", "commit", "-m", "test commit"])
+            mock_run.assert_any_call(["git", "push", "-u", "origin", "feature/test"])
+
+    @pytest.mark.asyncio
+    async def test_adds_specific_paths_when_provided(self) -> None:
+        with patch.object(github_ops, "_run", new_callable=AsyncMock) as mock_run:
+            await github_ops.commit_and_push(
+                "feature/test", "test commit",
+                paths=["plugins/foo.py", "plugins/bar.py"],
+            )
+            assert mock_run.call_count == 3
+            mock_run.assert_any_call(
+                ["git", "add", "--", "plugins/foo.py", "plugins/bar.py"]
+            )
             mock_run.assert_any_call(["git", "commit", "-m", "test commit"])
             mock_run.assert_any_call(["git", "push", "-u", "origin", "feature/test"])
 

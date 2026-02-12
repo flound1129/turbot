@@ -127,10 +127,9 @@ class TestHttpTimeout:
         ctx = plugin_api.PluginContext(MagicMock(), "test")
         mock_session = AsyncMock()
         mock_session.get = AsyncMock()
-        with patch("plugin_api.aiohttp.ClientSession") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            await ctx.http_get("https://example.com")
+        mock_session.closed = False
+        ctx._session = mock_session
+        await ctx.http_get("https://example.com")
         _, kwargs = mock_session.get.call_args
         assert kwargs.get("timeout") == plugin_api.HTTP_TIMEOUT
 
@@ -139,10 +138,9 @@ class TestHttpTimeout:
         ctx = plugin_api.PluginContext(MagicMock(), "test")
         mock_session = AsyncMock()
         mock_session.post = AsyncMock()
-        with patch("plugin_api.aiohttp.ClientSession") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            await ctx.http_post("https://example.com")
+        mock_session.closed = False
+        ctx._session = mock_session
+        await ctx.http_post("https://example.com")
         _, kwargs = mock_session.post.call_args
         assert kwargs.get("timeout") == plugin_api.HTTP_TIMEOUT
 
@@ -153,9 +151,79 @@ class TestHttpTimeout:
         custom_timeout = aiohttp.ClientTimeout(total=60)
         mock_session = AsyncMock()
         mock_session.get = AsyncMock()
-        with patch("plugin_api.aiohttp.ClientSession") as mock_cls:
-            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            await ctx.http_get("https://example.com", timeout=custom_timeout)
+        mock_session.closed = False
+        ctx._session = mock_session
+        await ctx.http_get("https://example.com", timeout=custom_timeout)
         _, kwargs = mock_session.get.call_args
         assert kwargs.get("timeout") == custom_timeout
+
+
+class TestStoreKeyValidation:
+    """Tests for store key path traversal prevention."""
+
+    def test_rejects_path_separator(self) -> None:
+        with pytest.raises(ValueError, match="Invalid store key"):
+            plugin_api._validate_store_key("foo/bar")
+
+    def test_rejects_backslash(self) -> None:
+        with pytest.raises(ValueError, match="Invalid store key"):
+            plugin_api._validate_store_key("foo\\bar")
+
+    def test_rejects_dotdot(self) -> None:
+        with pytest.raises(ValueError, match="Invalid store key"):
+            plugin_api._validate_store_key("..")
+
+    def test_rejects_dot(self) -> None:
+        with pytest.raises(ValueError, match="Invalid store key"):
+            plugin_api._validate_store_key(".")
+
+    def test_rejects_hidden_file(self) -> None:
+        with pytest.raises(ValueError, match="Invalid store key"):
+            plugin_api._validate_store_key(".secret")
+
+    def test_accepts_valid_key(self) -> None:
+        # Should not raise
+        plugin_api._validate_store_key("my_key")
+        plugin_api._validate_store_key("scores")
+
+    def test_store_get_rejects_traversal(self, tmp_path: str) -> None:
+        ctx = plugin_api.PluginContext(MagicMock(), "test")
+        ctx._store_dir = str(tmp_path / "test")
+        with pytest.raises(ValueError, match="Invalid store key"):
+            ctx.store_get("../other_plugin/secrets")
+
+    def test_store_set_rejects_traversal(self, tmp_path: str) -> None:
+        ctx = plugin_api.PluginContext(MagicMock(), "test")
+        ctx._store_dir = str(tmp_path / "test")
+        with pytest.raises(ValueError, match="Invalid store key"):
+            ctx.store_set("../other_plugin/secrets", {"hacked": True})
+
+
+class TestSessionLifecycle:
+    """Tests for shared HTTP session lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_close_closes_session(self) -> None:
+        ctx = plugin_api.PluginContext(MagicMock(), "test")
+        mock_session = AsyncMock()
+        mock_session.closed = False
+        ctx._session = mock_session
+        await ctx.close()
+        mock_session.close.assert_called_once()
+        assert ctx._session is None
+
+    @pytest.mark.asyncio
+    async def test_close_noop_when_no_session(self) -> None:
+        ctx = plugin_api.PluginContext(MagicMock(), "test")
+        # Should not raise
+        await ctx.close()
+
+    @pytest.mark.asyncio
+    async def test_cog_unload_closes_session(self) -> None:
+        bot = MagicMock()
+        plugin = plugin_api.TurbotPlugin(bot)
+        mock_session = AsyncMock()
+        mock_session.closed = False
+        plugin.turbot._session = mock_session
+        await plugin.cog_unload()
+        mock_session.close.assert_called_once()

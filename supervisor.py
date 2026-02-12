@@ -12,6 +12,8 @@ PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DEPLOY_SIGNAL: str = os.path.join(PROJECT_DIR, ".deploy")
 STATUS_FILE: str = os.path.join(PROJECT_DIR, ".status")
 HEALTH_TIMEOUT: int = 30  # seconds — if bot crashes faster than this, it's a bad deploy
+GIT_TIMEOUT: int = 120  # seconds for git operations
+PIP_TIMEOUT: int = 300  # seconds for pip install
 LOG_FILE: str = os.path.join(PROJECT_DIR, "supervisor.log")
 
 shutting_down: bool = False
@@ -35,17 +37,19 @@ def get_current_commit() -> str:
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"],
         cwd=PROJECT_DIR,
+        timeout=GIT_TIMEOUT,
     ).decode().strip()
 
 
 def run_git(args: list[str]) -> None:
-    subprocess.check_call(["git", *args], cwd=PROJECT_DIR)
+    subprocess.check_call(["git", *args], cwd=PROJECT_DIR, timeout=GIT_TIMEOUT)
 
 
 def install_deps() -> None:
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
         cwd=PROJECT_DIR,
+        timeout=PIP_TIMEOUT,
     )
 
 

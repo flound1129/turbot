@@ -53,8 +53,13 @@ class TestGetCurrentCommit:
         with patch.object(
             subprocess, "check_output",
             return_value=b"abc123def456\n",
-        ):
+        ) as mock:
             assert supervisor.get_current_commit() == "abc123def456"
+            mock.assert_called_once_with(
+                ["git", "rev-parse", "HEAD"],
+                cwd=supervisor.PROJECT_DIR,
+                timeout=supervisor.GIT_TIMEOUT,
+            )
 
 
 class TestRunGit:
@@ -64,6 +69,7 @@ class TestRunGit:
             mock.assert_called_once_with(
                 ["git", "pull", "origin", "main"],
                 cwd=supervisor.PROJECT_DIR,
+                timeout=supervisor.GIT_TIMEOUT,
             )
 
 
