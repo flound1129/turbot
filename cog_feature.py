@@ -9,6 +9,7 @@ import anthropic
 import discord
 from discord.ext import commands
 
+from api_health import claude_health, is_transient
 import config
 import github_ops
 import policy
@@ -150,7 +151,10 @@ class FeatureRequestCog(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        self.client = anthropic.Anthropic(
+            api_key=config.ANTHROPIC_API_KEY,
+            timeout=anthropic.Timeout(connect=5.0, read=90.0, write=5.0, pool=10.0),
+        )
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -185,9 +189,17 @@ class FeatureRequestCog(commands.Cog):
             await message.reply("Please describe the feature after the request prefix.")
             return
 
+        label = "Feature request" if request_type == "plugin" else "Bot improvement"
+
+        if not claude_health.available:
+            await message.reply(
+                "The Claude API is currently unavailable, so I can't process "
+                "feature requests right now. Please try again in a few minutes."
+            )
+            return
+
         await message.reply("On it! Generating code changes... this may take a moment.")
 
-        label = "Feature request" if request_type == "plugin" else "Bot improvement"
         await _log(
             f"**{label}** from {message.author} "
             f"in <#{message.channel.id}>: {feature_desc}"
@@ -202,11 +214,29 @@ class FeatureRequestCog(commands.Cog):
             await message.reply(str(e))
             await _log(f"**{label} rejected** (policy violation): {e}")
         except Exception as e:
-            await message.reply(f"Something went wrong while creating the PR: {e}")
-            await _log(
-                f"**{label} failed**: {e}\n"
-                f"Request was: {feature_desc}"
-            )
+            if is_transient(e):
+                tripped = claude_health.record_failure()
+                if tripped:
+                    await _log(
+                        f"**Circuit breaker opened** — Claude API appears "
+                        f"unreachable: {e}"
+                    )
+                await message.reply(
+                    "The Claude API is currently unavailable, so I can't process "
+                    "feature requests right now. Please try again in a few minutes."
+                )
+                await _log(
+                    f"**{label} failed** (API unreachable): {e}\n"
+                    f"Request was: {feature_desc}"
+                )
+            else:
+                await message.reply(
+                    f"Something went wrong while creating the PR: {e}"
+                )
+                await _log(
+                    f"**{label} failed**: {e}\n"
+                    f"Request was: {feature_desc}"
+                )
 
     async def _handle_request(self, description: str, request_type: str) -> str:
         """Generate code changes and create a PR."""
@@ -235,6 +265,7 @@ class FeatureRequestCog(commands.Cog):
                 ),
             }],
         )
+        claude_health.record_success()
 
         raw: str = response.content[0].text
         # Strip markdown fences if Claude added them despite instructions

@@ -16,6 +16,7 @@ import discord
 from discord.ext import commands
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
+HTTP_TIMEOUT: aiohttp.ClientTimeout = aiohttp.ClientTimeout(total=10)
 DATA_DIR: str = os.path.join(PROJECT_DIR, "data")
 
 
@@ -35,11 +36,13 @@ class PluginContext:
 
     async def http_get(self, url: str, **kwargs: Any) -> aiohttp.ClientResponse:
         """Perform an HTTP GET request via aiohttp."""
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             return await session.get(url, **kwargs)
 
     async def http_post(self, url: str, **kwargs: Any) -> aiohttp.ClientResponse:
         """Perform an HTTP POST request via aiohttp."""
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
         async with aiohttp.ClientSession() as session:
             return await session.post(url, **kwargs)
 

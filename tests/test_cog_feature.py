@@ -4,8 +4,10 @@ import json
 import re
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
+import anthropic
 import pytest
 
+from api_health import ClaudeHealth
 import cog_feature
 
 
@@ -381,3 +383,122 @@ class TestFormatViolations:
         assert "plugins/bad.py" in output
         assert "banned-import" in output
         assert "banned-builtin" in output
+
+
+class TestCogCircuitBreaker:
+    """Tests for circuit breaker integration in FeatureRequestCog."""
+
+    def _make_message(
+        self,
+        content: str = "<@99999> feature request: add a joke command",
+        *,
+        has_role: bool = True,
+    ) -> tuple[MagicMock, MagicMock]:
+        message = AsyncMock()
+        message.author.bot = False
+        message.content = content
+        message.channel.id = 12345
+        message.reply = AsyncMock()
+
+        bot_user = MagicMock()
+        bot_user.id = 99999
+        message.mentions = [bot_user]
+
+        if has_role:
+            role = MagicMock()
+            role.name = "BotAdmin"
+            import discord
+            message.author.__class__ = discord.Member
+            message.author.roles = [role]
+        else:
+            import discord
+            message.author.__class__ = discord.Member
+            message.author.roles = []
+
+        return message, bot_user
+
+    @pytest.mark.asyncio
+    async def test_feature_request_rejects_when_circuit_open(self) -> None:
+        """When circuit is open, feature request gets clear rejection."""
+        message, bot_user = self._make_message()
+        mock_bot = MagicMock()
+        mock_bot.user = bot_user
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        health = ClaudeHealth()
+        for _ in range(3):
+            health.record_failure()
+
+        with (
+            patch("cog_feature.claude_health", health),
+            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
+            patch.object(cog.client.messages, "create") as mock_create,
+        ):
+            await cog.on_message(message)
+
+        mock_create.assert_not_called()
+        reply_calls = [str(c) for c in message.reply.call_args_list]
+        assert any("unavailable" in c.lower() for c in reply_calls)
+
+    @pytest.mark.asyncio
+    async def test_records_success_after_code_gen(self) -> None:
+        """Successful Claude call in _handle_request resets the breaker."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+        health = ClaudeHealth()
+        health.record_failure()  # one failure, still closed
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "plugins/joke.py",
+                "action": "create",
+                "content": "import json\n",
+            }],
+            "summary": "Added joke plugin",
+            "title": "Add joke plugin",
+        }))]
+
+        with (
+            patch("cog_feature.claude_health", health),
+            patch.object(cog.client.messages, "create", return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch("github_ops.create_branch", new_callable=AsyncMock, return_value="feature/joke"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock),
+            patch("github_ops.open_pr", new_callable=AsyncMock, return_value="https://github.com/pr/1"),
+            patch("github_ops._run", new_callable=AsyncMock),
+        ):
+            await cog._handle_request("add a joke command", "plugin")
+
+        assert health._failures == 0
+        assert health.state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_records_failure_on_connectivity_error(self) -> None:
+        """Connectivity error in on_message triggers circuit breaker."""
+        message, bot_user = self._make_message()
+        mock_bot = MagicMock()
+        mock_bot.user = bot_user
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        health = ClaudeHealth()
+
+        with (
+            patch("cog_feature.claude_health", health),
+            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
+            patch.object(
+                cog.client.messages, "create",
+                side_effect=anthropic.APITimeoutError(request=None),
+            ),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(message)
+
+        assert health._failures == 1
+        reply_calls = [str(c) for c in message.reply.call_args_list]
+        assert any("unavailable" in c.lower() for c in reply_calls)

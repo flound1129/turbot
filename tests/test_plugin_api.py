@@ -117,3 +117,45 @@ class TestTurbotPlugin:
         plugin = plugin_api.TurbotPlugin(bot)
         # Should not raise even without plugin_unload defined
         await plugin.cog_unload()
+
+
+class TestHttpTimeout:
+    """Tests for default HTTP timeout on plugin HTTP calls."""
+
+    @pytest.mark.asyncio
+    async def test_http_get_has_default_timeout(self) -> None:
+        ctx = plugin_api.PluginContext(MagicMock(), "test")
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock()
+        with patch("plugin_api.aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            await ctx.http_get("https://example.com")
+        _, kwargs = mock_session.get.call_args
+        assert kwargs.get("timeout") == plugin_api.HTTP_TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_http_post_has_default_timeout(self) -> None:
+        ctx = plugin_api.PluginContext(MagicMock(), "test")
+        mock_session = AsyncMock()
+        mock_session.post = AsyncMock()
+        with patch("plugin_api.aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            await ctx.http_post("https://example.com")
+        _, kwargs = mock_session.post.call_args
+        assert kwargs.get("timeout") == plugin_api.HTTP_TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_custom_timeout_overrides_default(self) -> None:
+        import aiohttp
+        ctx = plugin_api.PluginContext(MagicMock(), "test")
+        custom_timeout = aiohttp.ClientTimeout(total=60)
+        mock_session = AsyncMock()
+        mock_session.get = AsyncMock()
+        with patch("plugin_api.aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            await ctx.http_get("https://example.com", timeout=custom_timeout)
+        _, kwargs = mock_session.get.call_args
+        assert kwargs.get("timeout") == custom_timeout

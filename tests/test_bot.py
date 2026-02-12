@@ -2,13 +2,15 @@ import hashlib
 import hmac
 import json
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import anthropic
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
 import bot
+from api_health import ClaudeHealth
 import config
 
 
@@ -207,3 +209,135 @@ class TestPluginAutoLoading:
         import inspect
         source = inspect.getsource(bot.main)
         assert "Failed to load plugin" in source
+
+
+class TestChatCircuitBreaker:
+    """Tests for circuit breaker integration in the chat handler."""
+
+    def _make_message(self, bot_user: MagicMock) -> MagicMock:
+        message = AsyncMock()
+        message.author.bot = False
+        message.content = "<@99999> hello"
+        message.channel.id = 42
+        message.reply = AsyncMock()
+        message.mentions = [bot_user]
+        return message
+
+    @pytest.mark.asyncio
+    async def test_chat_rejects_when_circuit_open(self) -> None:
+        """When circuit is open, user gets fallback message, no API call."""
+        health = ClaudeHealth()
+        for _ in range(3):
+            health.record_failure()
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+        with (
+            patch.object(bot, "claude_health", health),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create") as mock_create,
+        ):
+            await bot.on_message(message)
+
+        mock_create.assert_not_called()
+        reply_text = message.reply.call_args[0][0]
+        assert "unreachable" in reply_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_chat_records_success(self) -> None:
+        """Successful API call resets circuit breaker."""
+        health = ClaudeHealth()
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="Hello!")]
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+        with (
+            patch.object(bot, "claude_health", health),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", return_value=mock_response),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            await bot.on_message(message)
+
+        assert health.state == "closed"
+        assert health._failures == 0
+
+    @pytest.mark.asyncio
+    async def test_chat_records_failure_on_timeout(self) -> None:
+        """APITimeoutError trips the circuit breaker."""
+        health = ClaudeHealth()
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+        with (
+            patch.object(bot, "claude_health", health),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(
+                bot.claude.messages, "create",
+                side_effect=anthropic.APITimeoutError(request=None),
+            ),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            await bot.on_message(message)
+
+        assert health._failures == 1
+        reply_text = message.reply.call_args[0][0]
+        assert "unreachable" in reply_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_auth_error_does_not_trip_breaker(self) -> None:
+        """AuthenticationError should not affect the circuit breaker."""
+        health = ClaudeHealth()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.headers = {}
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+        with (
+            patch.object(bot, "claude_health", health),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(
+                bot.claude.messages, "create",
+                side_effect=anthropic.AuthenticationError(
+                    message="Invalid key", response=mock_resp, body=None,
+                ),
+            ),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            await bot.on_message(message)
+
+        assert health._failures == 0
+        reply_text = message.reply.call_args[0][0]
+        assert "something went wrong" in reply_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_recovery_logged_to_admin(self) -> None:
+        """When circuit recovers from half_open, admin is notified."""
+        health = ClaudeHealth()
+        # Trip open then force half_open
+        for _ in range(3):
+            health.record_failure()
+        health._state = "half_open"
+
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="I'm back!")]
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+        with (
+            patch.object(bot, "claude_health", health),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", return_value=mock_response),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
+        ):
+            await bot.on_message(message)
+
+        log_calls = [str(c) for c in mock_log.call_args_list]
+        assert any("recovered" in c.lower() for c in log_calls)

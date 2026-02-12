@@ -159,3 +159,16 @@ class TestRun:
     async def test_raises_on_failure(self) -> None:
         with pytest.raises(RuntimeError, match="failed"):
             await github_ops._run(["false"])
+
+    @pytest.mark.asyncio
+    async def test_timeout_kills_process(self) -> None:
+        """A command that exceeds the timeout should be killed."""
+        with pytest.raises(RuntimeError, match="timed out"):
+            await github_ops._run(["sleep", "10"], timeout=0.1)
+
+    @pytest.mark.asyncio
+    async def test_custom_timeout_parameter(self) -> None:
+        """Custom timeout should be respected."""
+        # This should complete within the generous timeout
+        result = await github_ops._run(["echo", "fast"], timeout=5.0)
+        assert result == "fast"

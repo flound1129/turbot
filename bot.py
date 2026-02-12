@@ -11,6 +11,7 @@ import discord
 from aiohttp import web
 from discord.ext import commands
 
+from api_health import claude_health, is_transient
 import config
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +28,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-claude = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+claude = anthropic.Anthropic(
+    api_key=config.ANTHROPIC_API_KEY,
+    timeout=anthropic.Timeout(connect=5.0, read=30.0, write=5.0, pool=10.0),
+)
 channel_history: dict[int, list[dict[str, str]]] = defaultdict(list)
 
 
@@ -109,6 +113,15 @@ async def on_message(message: discord.Message) -> None:
     if len(history) > MAX_HISTORY:
         history[:] = history[-MAX_HISTORY:]
 
+    if not claude_health.available:
+        await message.reply(
+            "The Claude API is currently unreachable, so I can't chat right now. "
+            "I'll keep trying to reconnect — check back in a few minutes!"
+        )
+        return
+
+    was_recovering = claude_health.state == "half_open"
+
     try:
         response = claude.messages.create(
             model="claude-sonnet-4-5-20250929",
@@ -122,6 +135,10 @@ async def on_message(message: discord.Message) -> None:
         )
         reply = response.content[0].text
 
+        claude_health.record_success()
+        if was_recovering:
+            await log_to_admin("**Claude API recovered** — circuit breaker reset.")
+
         history.append({"role": "assistant", "content": reply})
         if len(history) > MAX_HISTORY:
             history[:] = history[-MAX_HISTORY:]
@@ -132,7 +149,18 @@ async def on_message(message: discord.Message) -> None:
             await message.reply(chunk)
 
     except Exception as e:
-        await message.reply(f"Blub... something went wrong: {e}")
+        if is_transient(e):
+            tripped = claude_health.record_failure()
+            if tripped:
+                await log_to_admin(
+                    f"**Circuit breaker opened** — Claude API appears unreachable: {e}"
+                )
+            await message.reply(
+                "The Claude API is currently unreachable, so I can't chat right now. "
+                "I'll keep trying to reconnect — check back in a few minutes!"
+            )
+        else:
+            await message.reply(f"Blub... something went wrong: {e}")
         await log_to_admin(f"**Chat error** in <#{message.channel.id}>: {e}")
 
 

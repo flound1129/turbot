@@ -3,16 +3,30 @@ import os
 import re
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
+SUBPROCESS_TIMEOUT: float = 60.0
 
 
-async def _run(cmd: list[str], cwd: str | None = None) -> str:
+async def _run(
+    cmd: list[str],
+    cwd: str | None = None,
+    timeout: float = SUBPROCESS_TIMEOUT,
+) -> str:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd or PROJECT_DIR,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(
+            f"Command {cmd} timed out after {timeout}s"
+        )
     if proc.returncode != 0:
         raise RuntimeError(
             f"Command {cmd} failed (rc={proc.returncode}): {stderr.decode()}"

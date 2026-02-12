@@ -37,6 +37,7 @@ github_ops.py       — Git/GitHub helpers (branch, commit, push, PR via gh CLI)
 config.py           — Loads .env configuration
 plugin_api.py       — PluginContext + TurbotPlugin base class for plugins
 policy.py           — AST-based security scanner for plugin code
+api_health.py       — Circuit breaker for Claude API availability
 SECURITY_POLICY.md  — Machine-readable policy (injected into Claude prompts)
 plugins/            — Plugin directory (auto-loaded on startup)
   __init__.py       — Package marker
@@ -79,6 +80,28 @@ data/               — Plugin storage (created automatically, per-plugin isolat
 - Run with: `source .venv/bin/activate && pytest tests/`
 - Use `unittest.mock` to mock Discord, Claude API, git subprocess calls
 - Tests must not require any external services or env vars
+
+## API Resilience
+
+**Circuit breaker** (`api_health.py`): Tracks Claude API availability with three states — `closed` (healthy), `open` (down, fast-reject), `half_open` (probing recovery). Module-level singleton `claude_health` is shared by `bot.py` and `cog_feature.py`.
+
+**State transitions:**
+- `closed` → `open`: After 3 consecutive connectivity failures
+- `open` → `half_open`: After backoff expires (starts 30s, doubles to max 5min)
+- `half_open` → `closed`: Probe call succeeds
+- `half_open` → `open`: Probe call fails (backoff doubles)
+
+**Error classification** — only connectivity errors trip the breaker:
+- Trips breaker: `APIConnectionError`, `APITimeoutError`, `InternalServerError`, `RateLimitError`
+- Does NOT trip: `AuthenticationError`, `BadRequestError` (API is reachable, problem is on our side)
+
+**Timeouts:**
+- Chat API calls (`bot.py`): 30s read, 5s connect
+- Code gen (`cog_feature.py`): 90s read, 5s connect
+- Plugin HTTP calls (`plugin_api.py`): 10s total (plugins can override)
+- Git subprocesses (`github_ops.py`): 60s (kills process on timeout)
+
+**Fallback behavior:** When the circuit is open, chat and feature requests get friendly rejection messages. No message queuing — clear rejection is simpler and more honest. Admin channel is notified when the circuit opens or recovers.
 
 ## Security
 
