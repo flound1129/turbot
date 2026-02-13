@@ -48,11 +48,33 @@ data/               — Plugin storage (created automatically, per-plugin isolat
 ## Key Behaviors
 
 - **Chat**: @mention the bot → Claude responds with per-channel conversation memory (last 20 messages)
-- **Feature requests**: @mention with "feature request: <description>" → role check → Claude generates plugin code → AST scan → opens PR
-- **Bot improvements**: @mention with "bot improvement: <description>" → role check → Claude generates core code → PR flagged as CORE CHANGE
+- **Feature requests**: @mention with "feature request: <description>" → role check → creates Discord thread → multi-turn planning conversation with Claude → user confirms → code gen → AST scan → opens PR
+- **Bot improvements**: @mention with "bot improvement: <description>" → role check → creates Discord thread → planning conversation → user confirms → code gen → PR flagged as CORE CHANGE
 - **Deploy**: GitHub webhook on PR merge → bot writes `.deploy` + exits → supervisor pulls + restarts
 - **Rollback**: If bot crashes within 30s of deploy, supervisor reverts to last known good commit
 - **Admin channel**: `LOG_CHANNEL_ID` — bot posts deploy status, errors, feature request activity, rollback alerts
+
+## Conversational Feature Request Flow
+
+Feature requests use a multi-turn thread conversation instead of one-shot code generation:
+
+1. User @mentions the bot with a feature request in a regular channel
+2. Bot creates a Discord thread from the message
+3. Bot calls Claude (using `PLANNING_SYSTEM_PROMPT`) to evaluate the request and ask clarifying questions
+4. User and Claude go back and forth in the thread until the plan is clear
+5. When Claude is satisfied, it includes a `---PLAN_READY---` marker in its response
+6. Bot strips the marker and prompts the user to confirm with "go" (or keep refining)
+7. On confirmation, bot runs the existing code generation pipeline (`_handle_request`) and posts the PR link in the thread
+
+**Thread session states:** `discussing` → `plan_ready` → `generating` → `done`
+
+**Key rules:**
+- Only the original requester's messages are processed in the thread
+- Sessions time out after 30 minutes of inactivity
+- User can cancel anytime with "cancel", "nvm", "abort", etc.
+- Confirmation words: "go", "yes", "proceed", "lgtm", "ship it", etc.
+- In `plan_ready` state, unrecognized text returns to `discussing` for continued refinement
+- Thread sessions are stored in-memory (`_sessions` dict keyed by thread ID)
 
 ## Code Style
 
@@ -73,6 +95,13 @@ data/               — Plugin storage (created automatically, per-plugin isolat
 - `WEBHOOK_SECRET` — GitHub webhook HMAC secret
 - `WEBHOOK_PORT` — webhook listener port (default: 8080)
 - `LOG_CHANNEL_ID` — Discord channel ID for admin/log messages
+- `PLANNING_MODEL` — Claude model for planning conversations (default: same as `CLAUDE_MODEL`)
+
+## CI/CD
+
+- GitHub Actions runs on every push to `main` and PR to `main`
+- Matrix: Python 3.12, 3.13
+- Dev dependencies in `requirements-dev.txt` (includes pytest + pytest-asyncio)
 
 ## Testing
 

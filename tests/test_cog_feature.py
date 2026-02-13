@@ -2,9 +2,11 @@
 
 import json
 import re
+import time
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 
 import anthropic
+import discord
 import pytest
 
 from api_health import ClaudeHealth
@@ -91,9 +93,17 @@ class TestFeatureRequestCog:
     ) -> tuple[MagicMock, MagicMock]:
         message = AsyncMock()
         message.author.bot = is_bot
+        message.author.id = 55555
         message.content = content
         message.channel.id = 12345
+        message.channel.__class__ = discord.TextChannel
         message.reply = AsyncMock()
+
+        # Mock thread creation
+        mock_thread = AsyncMock()
+        mock_thread.id = 99900
+        mock_thread.send = AsyncMock()
+        message.create_thread = AsyncMock(return_value=mock_thread)
 
         bot_user = MagicMock()
         bot_user.id = 99999
@@ -107,11 +117,9 @@ class TestFeatureRequestCog:
             role = MagicMock()
             role.name = role_name
 
-            import discord
             message.author.__class__ = discord.Member
             message.author.roles = [role]
         else:
-            import discord
             message.author.__class__ = discord.Member
             message.author.roles = []
 
@@ -186,7 +194,10 @@ class TestFeatureRequestCog:
         assert any("describe the feature" in c.lower() for c in calls)
 
     @pytest.mark.asyncio
-    async def test_successful_plugin_request(self) -> None:
+    async def test_successful_plugin_request_creates_thread(self) -> None:
+        """Feature request creates a thread and starts planning conversation."""
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
         message, bot_user = self._make_message(
             "<@99999> feature request: add a ping command",
             has_role=True,
@@ -196,37 +207,45 @@ class TestFeatureRequestCog:
         mock_bot.user = bot_user
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
-        claude_response = MagicMock()
-        claude_response.content = [MagicMock(text=json.dumps({
-            "changes": [{
-                "path": "plugins/ping.py",
-                "action": "create",
-                "content": "import json\n",
-            }],
-            "summary": "Added ping plugin",
-            "title": "Add ping plugin",
-        }))]
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(
+            text="Interesting! A few questions:\n1. What should !ping respond with?"
+        )]
 
         with (
             patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
-            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
-            patch.object(cog_feature, "_read_plugin_context", return_value={"plugin_api.py": "# api"}),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_response,
+            ),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
-            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
-            patch("github_ops.create_branch", new_callable=AsyncMock, return_value="feature/add-a-ping-command"),
-            patch("github_ops.apply_changes"),
-            patch("github_ops.commit_and_push", new_callable=AsyncMock),
-            patch("github_ops.open_pr", new_callable=AsyncMock, return_value="https://github.com/user/repo/pull/1"),
-            patch("github_ops._run", new_callable=AsyncMock),
         ):
             await cog.on_message(message)
 
-        reply_calls = [str(c) for c in message.reply.call_args_list]
-        assert any("Turbotastic" in c for c in reply_calls)
-        assert any("pull/1" in c for c in reply_calls)
+        # Thread should have been created
+        message.create_thread.assert_called_once()
+        thread_name = message.create_thread.call_args[1]["name"]
+        assert "add a ping command" in thread_name
+
+        # Planning response should have been sent to thread
+        mock_thread = message.create_thread.return_value
+        mock_thread.send.assert_called_once()
+        send_text = mock_thread.send.call_args[0][0]
+        assert "questions" in send_text.lower()
+
+        # Session should be tracked
+        assert 99900 in cog_feature._sessions
+        session = cog_feature._sessions[99900]
+        assert session.state == "discussing"
+        assert session.request_type == "plugin"
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
 
     @pytest.mark.asyncio
-    async def test_successful_core_request(self) -> None:
+    async def test_successful_core_request_creates_thread(self) -> None:
+        """Bot improvement request creates a thread and starts planning."""
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
         message, bot_user = self._make_message(
             "<@99999> bot improvement: fix a bug in bot.py",
             has_role=True,
@@ -236,36 +255,27 @@ class TestFeatureRequestCog:
         mock_bot.user = bot_user
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
-        claude_response = MagicMock()
-        claude_response.content = [MagicMock(text=json.dumps({
-            "changes": [{
-                "path": "bot.py",
-                "action": "modify",
-                "content": "# fixed bot",
-            }],
-            "summary": "Fixed bug in bot.py",
-            "title": "Fix bot bug",
-        }))]
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(
+            text="I can help with that! What bug are you seeing?"
+        )]
 
         with (
             patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
-            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
-            patch.object(cog_feature, "_read_project_files", return_value={"bot.py": "# bot"}),
-            patch.object(cog_feature, "_log", new_callable=AsyncMock) as mock_log,
-            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
-            patch("github_ops.create_branch", new_callable=AsyncMock, return_value="feature/fix-a-bug"),
-            patch("github_ops.apply_changes"),
-            patch("github_ops.commit_and_push", new_callable=AsyncMock),
-            patch("github_ops.open_pr", new_callable=AsyncMock, return_value="https://github.com/user/repo/pull/2"),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_response,
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
         ):
             await cog.on_message(message)
 
-        reply_calls = [str(c) for c in message.reply.call_args_list]
-        assert any("Turbotastic" in c for c in reply_calls)
-        # Core change should trigger admin warning
-        log_calls = [str(c) for c in mock_log.call_args_list]
-        assert any("CORE CHANGE" in c for c in log_calls)
+        message.create_thread.assert_called_once()
+        assert 99900 in cog_feature._sessions
+        session = cog_feature._sessions[99900]
+        assert session.request_type == "core"
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
 
 
 class TestPolicyViolationRejectspr:
@@ -295,12 +305,6 @@ class TestPolicyViolationRejectspr:
         ):
             with pytest.raises(ValueError, match="Security policy violations"):
                 await cog._handle_request("add evil thing", "plugin")
-
-            # Branch was created but apply_changes should NOT have been called
-            # because the violation check happens before apply
-            # Actually, violations are checked after Claude responds but before PR creation
-            # In our code, branch is created first then violations are checked
-            # Let's verify the ValueError is raised
 
 
 class TestCoreChangeFlag:
@@ -394,7 +398,13 @@ class TestRateLimiting:
         message.author.id = 77777
         message.content = "<@99999> feature request: add a joke command"
         message.channel.id = 12345
+        message.channel.__class__ = discord.TextChannel
         message.reply = AsyncMock()
+
+        mock_thread = AsyncMock()
+        mock_thread.id = 99900
+        mock_thread.send = AsyncMock()
+        message.create_thread = AsyncMock(return_value=mock_thread)
 
         bot_user = MagicMock()
         bot_user.id = 99999
@@ -402,7 +412,6 @@ class TestRateLimiting:
 
         role = MagicMock()
         role.name = "BotAdmin"
-        import discord
         message.author.__class__ = discord.Member
         message.author.roles = [role]
 
@@ -418,7 +427,6 @@ class TestRateLimiting:
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
         # Simulate a recent request from this user
-        import time
         cog_feature._last_request[77777] = time.monotonic()
 
         with (
@@ -434,27 +442,34 @@ class TestRateLimiting:
 
     @pytest.mark.asyncio
     async def test_allows_request_after_cooldown(self) -> None:
-        """Request after cooldown period is allowed."""
+        """Request after cooldown period is allowed — creates thread."""
         cog_feature._last_request.clear()
+        cog_feature._sessions.clear()
         message, bot_user = self._make_message()
         mock_bot = MagicMock()
         mock_bot.user = bot_user
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
         # Simulate a request from long ago
-        import time
         cog_feature._last_request[77777] = time.monotonic() - 999
+
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(text="Let me evaluate this request.")]
 
         with (
             patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
-            patch.object(cog, "_handle_request", new_callable=AsyncMock, return_value="https://github.com/pr/1"),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_response,
+            ),
         ):
             await cog.on_message(message)
 
-        reply_calls = [str(c) for c in message.reply.call_args_list]
-        assert any("Turbotastic" in c for c in reply_calls)
+        # Thread should have been created (request was allowed)
+        message.create_thread.assert_called_once()
         cog_feature._last_request.clear()
+        cog_feature._sessions.clear()
 
 
 class TestHandleRequestValidation:
@@ -538,7 +553,13 @@ class TestCogCircuitBreaker:
         message.author.bot = False
         message.content = content
         message.channel.id = 12345
+        message.channel.__class__ = discord.TextChannel
         message.reply = AsyncMock()
+
+        mock_thread = AsyncMock()
+        mock_thread.id = 99900
+        mock_thread.send = AsyncMock()
+        message.create_thread = AsyncMock(return_value=mock_thread)
 
         bot_user = MagicMock()
         bot_user.id = 99999
@@ -547,11 +568,9 @@ class TestCogCircuitBreaker:
         if has_role:
             role = MagicMock()
             role.name = "BotAdmin"
-            import discord
             message.author.__class__ = discord.Member
             message.author.roles = [role]
         else:
-            import discord
             message.author.__class__ = discord.Member
             message.author.roles = []
 
@@ -618,7 +637,9 @@ class TestCogCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_records_failure_on_connectivity_error(self) -> None:
-        """Connectivity error in on_message triggers circuit breaker."""
+        """Connectivity error during planning triggers circuit breaker."""
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
         message, bot_user = self._make_message()
         mock_bot = MagicMock()
         mock_bot.user = bot_user
@@ -633,12 +654,544 @@ class TestCogCircuitBreaker:
                 cog.client.messages, "create",
                 new_callable=AsyncMock, side_effect=anthropic.APITimeoutError(request=None),
             ),
-            patch.object(cog_feature, "_read_plugin_context", return_value={}),
-            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
         ):
             await cog.on_message(message)
 
         assert health._failures == 1
-        reply_calls = [str(c) for c in message.reply.call_args_list]
-        assert any("unavailable" in c.lower() for c in reply_calls)
+        # Error message should be sent to the thread
+        mock_thread = message.create_thread.return_value
+        send_calls = [str(c) for c in mock_thread.send.call_args_list]
+        assert any("unavailable" in c.lower() for c in send_calls)
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+
+class TestPlanningSystemPrompt:
+    """Tests for the planning system prompt."""
+
+    def test_planning_prompt_mentions_turbot(self) -> None:
+        assert "Turbot" in cog_feature.PLANNING_SYSTEM_PROMPT
+
+    def test_planning_prompt_mentions_plan_ready_marker(self) -> None:
+        assert cog_feature.PLAN_READY_MARKER in cog_feature.PLANNING_SYSTEM_PROMPT
+
+    def test_planning_prompt_instructs_clarifying_questions(self) -> None:
+        assert "clarifying" in cog_feature.PLANNING_SYSTEM_PROMPT.lower()
+
+
+class TestThreadSession:
+    """Tests for ThreadSession dataclass and helpers."""
+
+    def test_session_default_state(self) -> None:
+        session = cog_feature.ThreadSession(
+            thread_id=1, user_id=2, request_type="plugin",
+            original_description="test",
+        )
+        assert session.state == "discussing"
+        assert session.messages == []
+        assert session.refined_description is None
+
+    def test_check_session_timeout_not_expired(self) -> None:
+        session = cog_feature.ThreadSession(
+            thread_id=1, user_id=2, request_type="plugin",
+            original_description="test",
+        )
+        session.last_active = time.monotonic()
+        assert not cog_feature._check_session_timeout(session)
+
+    def test_check_session_timeout_expired(self) -> None:
+        session = cog_feature.ThreadSession(
+            thread_id=1, user_id=2, request_type="plugin",
+            original_description="test",
+        )
+        session.last_active = time.monotonic() - 2000
+        assert cog_feature._check_session_timeout(session)
+
+    def test_is_confirmation(self) -> None:
+        assert cog_feature._is_confirmation("go")
+        assert cog_feature._is_confirmation("Go")
+        assert cog_feature._is_confirmation("  yes  ")
+        assert cog_feature._is_confirmation("lgtm")
+        assert cog_feature._is_confirmation("ship it")
+        assert not cog_feature._is_confirmation("maybe")
+        assert not cog_feature._is_confirmation("add more details")
+
+    def test_is_cancellation(self) -> None:
+        assert cog_feature._is_cancellation("cancel")
+        assert cog_feature._is_cancellation("Cancel")
+        assert cog_feature._is_cancellation("nvm")
+        assert cog_feature._is_cancellation("abort")
+        assert not cog_feature._is_cancellation("go")
+        assert not cog_feature._is_cancellation("hello")
+
+
+def _make_thread_message(
+    thread_id: int,
+    user_id: int,
+    content: str,
+) -> MagicMock:
+    """Helper to create a mock message in a tracked thread."""
+    message = AsyncMock()
+    message.author.bot = False
+    message.author.id = user_id
+    message.content = content
+
+    # Make the channel look like a discord.Thread
+    channel = MagicMock(spec=discord.Thread)
+    channel.id = thread_id
+    channel.send = AsyncMock()
+    message.channel = channel
+
+    return message
+
+
+class TestThreadConversation:
+    """Tests for the multi-turn thread conversation flow."""
+
+    def setup_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    def teardown_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    @pytest.mark.asyncio
+    async def test_thread_message_forwarded_to_claude(self) -> None:
+        """User message in thread is forwarded to Claude for planning."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            messages=[
+                {"role": "user", "content": "Feature request: add a leaderboard"},
+                {"role": "assistant", "content": "What kind of leaderboard?"},
+            ],
+        )
+        cog_feature._sessions[5000] = session
+
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(text="Got it, a points-based leaderboard.")]
+
+        message = _make_thread_message(5000, 111, "A points-based leaderboard")
+
+        with patch.object(
+            cog.client.messages, "create",
+            new_callable=AsyncMock, return_value=planning_response,
+        ) as mock_create:
+            await cog.on_message(message)
+
+            # Claude should have been called
+            mock_create.assert_called_once()
+
+        # Response should be sent to thread
+        message.channel.send.assert_called_once_with("Got it, a points-based leaderboard.")
+        # User message should be added to session
+        assert session.messages[-2]["role"] == "user"
+        assert session.messages[-2]["content"] == "A points-based leaderboard"
+        assert session.messages[-1]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_thread_message_from_different_user_ignored(self) -> None:
+        """Messages from non-requester in thread are ignored."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+        )
+        cog_feature._sessions[5000] = session
+
+        # Different user (222) sends message in the thread
+        message = _make_thread_message(5000, 222, "I also want this!")
+
+        with patch.object(cog.client.messages, "create", new_callable=AsyncMock) as mock_create:
+            await cog.on_message(message)
+
+        mock_create.assert_not_called()
+        message.channel.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plan_ready_marker_detected_and_stripped(self) -> None:
+        """PLAN_READY marker transitions state and is stripped from display."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            messages=[
+                {"role": "user", "content": "Feature request: add a leaderboard"},
+                {"role": "assistant", "content": "What kind?"},
+            ],
+        )
+        cog_feature._sessions[5000] = session
+
+        plan_text = "Here's the plan: create a points-based leaderboard plugin.\n---PLAN_READY---"
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(text=plan_text)]
+
+        message = _make_thread_message(5000, 111, "A points-based one")
+
+        with patch.object(
+            cog.client.messages, "create",
+            new_callable=AsyncMock, return_value=planning_response,
+        ):
+            await cog.on_message(message)
+
+        assert session.state == "plan_ready"
+        assert session.refined_description is not None
+        assert "---PLAN_READY---" not in session.refined_description
+
+        # Display text should not contain the marker but should have the go prompt
+        send_text = message.channel.send.call_args[0][0]
+        assert "---PLAN_READY---" not in send_text
+        assert "go" in send_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_confirmation_triggers_code_generation(self) -> None:
+        """Saying 'go' in plan_ready state triggers code gen and PR creation."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+            refined_description="Create a points-based leaderboard plugin",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "go")
+
+        with (
+            patch.object(
+                cog, "_handle_request",
+                new_callable=AsyncMock,
+                return_value="https://github.com/user/repo/pull/42",
+            ) as mock_handle,
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(message)
+
+            # _handle_request should have been called with the refined description
+            mock_handle.assert_called_once_with(
+                "Create a points-based leaderboard plugin", "plugin",
+            )
+
+        # PR link should be posted in thread
+        send_calls = [str(c) for c in message.channel.send.call_args_list]
+        assert any("pull/42" in c for c in send_calls)
+        assert any("Turbotastic" in c for c in send_calls)
+        # Session should be cleaned up
+        assert 5000 not in cog_feature._sessions
+
+    @pytest.mark.asyncio
+    async def test_confirmation_uses_original_desc_if_no_refined(self) -> None:
+        """If no refined_description, confirmation uses original_description."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+            refined_description=None,
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "yes")
+
+        with (
+            patch.object(
+                cog, "_handle_request",
+                new_callable=AsyncMock,
+                return_value="https://github.com/user/repo/pull/1",
+            ) as mock_handle,
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(message)
+
+            mock_handle.assert_called_once_with(
+                "add a leaderboard", "plugin",
+            )
+
+    @pytest.mark.asyncio
+    async def test_cancel_ends_session(self) -> None:
+        """Saying 'cancel' in plan_ready state ends the session."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "cancel")
+
+        await cog.on_message(message)
+
+        send_text = message.channel.send.call_args[0][0]
+        assert "cancelled" in send_text.lower()
+        assert 5000 not in cog_feature._sessions
+
+    @pytest.mark.asyncio
+    async def test_non_confirm_in_plan_ready_returns_to_discussing(self) -> None:
+        """Unrecognized text in plan_ready returns to discussing state."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+            messages=[
+                {"role": "user", "content": "Feature request: add a leaderboard"},
+                {"role": "assistant", "content": "Plan: leaderboard plugin"},
+            ],
+        )
+        cog_feature._sessions[5000] = session
+
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(text="Updated plan with more detail.")]
+
+        message = _make_thread_message(5000, 111, "Actually, can it also track streaks?")
+
+        with patch.object(
+            cog.client.messages, "create",
+            new_callable=AsyncMock, return_value=planning_response,
+        ) as mock_create:
+            await cog.on_message(message)
+
+            # Claude should have been called
+            mock_create.assert_called_once()
+
+        # State should have gone back to discussing then stayed there
+        assert session.state == "discussing"
+
+    @pytest.mark.asyncio
+    async def test_session_timeout(self) -> None:
+        """Expired session gets timeout message and is removed."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+        )
+        # Set last_active to well past the timeout
+        session.last_active = time.monotonic() - 2000
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "hello?")
+
+        await cog.on_message(message)
+
+        send_text = message.channel.send.call_args[0][0]
+        assert "timed out" in send_text.lower()
+        assert 5000 not in cog_feature._sessions
+
+    @pytest.mark.asyncio
+    async def test_messages_in_generating_state_ignored(self) -> None:
+        """Messages while code is being generated are ignored."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="generating",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "how's it going?")
+
+        await cog.on_message(message)
+
+        message.channel.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_messages_in_done_state_ignored(self) -> None:
+        """Messages after completion are ignored."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="done",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "thanks!")
+
+        await cog.on_message(message)
+
+        message.channel.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_on_planning_call(self) -> None:
+        """Planning call respects circuit breaker."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            messages=[
+                {"role": "user", "content": "Feature request: add a leaderboard"},
+            ],
+        )
+        cog_feature._sessions[5000] = session
+
+        health = ClaudeHealth()
+        for _ in range(3):
+            health.record_failure()
+
+        message = _make_thread_message(5000, 111, "a points-based one")
+
+        with patch("cog_feature.claude_health", health):
+            await cog.on_message(message)
+
+        send_text = message.channel.send.call_args[0][0]
+        assert "unavailable" in send_text.lower()
+
+    @pytest.mark.asyncio
+    async def test_full_end_to_end_flow(self) -> None:
+        """Full flow: trigger -> discuss -> plan_ready -> confirm -> PR."""
+        mock_bot = MagicMock()
+        mock_bot.user = MagicMock(id=99999)
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        # Step 1: Initial feature request triggers thread creation
+        initial_msg = AsyncMock()
+        initial_msg.author.bot = False
+        initial_msg.author.id = 111
+        initial_msg.content = "<@99999> feature request: add a leaderboard"
+        initial_msg.channel.id = 12345
+        initial_msg.channel.__class__ = discord.TextChannel
+        initial_msg.reply = AsyncMock()
+
+        mock_thread = AsyncMock()
+        mock_thread.id = 5000
+        mock_thread.send = AsyncMock()
+        initial_msg.create_thread = AsyncMock(return_value=mock_thread)
+        initial_msg.mentions = [mock_bot.user]
+
+        role = MagicMock()
+        role.name = "BotAdmin"
+        initial_msg.author.__class__ = discord.Member
+        initial_msg.author.roles = [role]
+
+        # Planning response asks clarifying questions
+        planning_resp1 = MagicMock()
+        planning_resp1.content = [MagicMock(text="What metrics should the leaderboard track?")]
+
+        with (
+            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_resp1,
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(initial_msg)
+
+        assert 5000 in cog_feature._sessions
+        session = cog_feature._sessions[5000]
+        assert session.state == "discussing"
+
+        # Step 2: User answers in thread
+        thread_msg1 = _make_thread_message(5000, 111, "Track message count and XP")
+
+        planning_resp2 = MagicMock()
+        planning_resp2.content = [MagicMock(
+            text="Plan: Create a leaderboard plugin tracking messages and XP.\n---PLAN_READY---"
+        )]
+
+        with patch.object(
+            cog.client.messages, "create",
+            new_callable=AsyncMock, return_value=planning_resp2,
+        ):
+            await cog.on_message(thread_msg1)
+
+        assert session.state == "plan_ready"
+
+        # Step 3: User confirms
+        confirm_msg = _make_thread_message(5000, 111, "go")
+
+        with (
+            patch.object(
+                cog, "_handle_request",
+                new_callable=AsyncMock,
+                return_value="https://github.com/user/repo/pull/99",
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(confirm_msg)
+
+        # PR link should be posted
+        send_calls = [str(c) for c in confirm_msg.channel.send.call_args_list]
+        assert any("pull/99" in c for c in send_calls)
+        # Session should be cleaned up
+        assert 5000 not in cog_feature._sessions
+
+    @pytest.mark.asyncio
+    async def test_initial_plan_ready_on_first_call(self) -> None:
+        """If Claude returns PLAN_READY on first message, state goes to plan_ready."""
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+        mock_bot = MagicMock()
+        mock_bot.user = MagicMock(id=99999)
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        initial_msg = AsyncMock()
+        initial_msg.author.bot = False
+        initial_msg.author.id = 111
+        initial_msg.content = "<@99999> feature request: add a simple ping command"
+        initial_msg.channel.id = 12345
+        initial_msg.channel.__class__ = discord.TextChannel
+        initial_msg.reply = AsyncMock()
+        initial_msg.mentions = [mock_bot.user]
+
+        mock_thread = AsyncMock()
+        mock_thread.id = 6000
+        mock_thread.send = AsyncMock()
+        initial_msg.create_thread = AsyncMock(return_value=mock_thread)
+
+        role = MagicMock()
+        role.name = "BotAdmin"
+        initial_msg.author.__class__ = discord.Member
+        initial_msg.author.roles = [role]
+
+        # Claude immediately proposes a plan
+        planning_resp = MagicMock()
+        planning_resp.content = [MagicMock(
+            text="Simple enough! Plan: Add !ping command that replies 'Pong!'.\n---PLAN_READY---"
+        )]
+
+        with (
+            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_resp,
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(initial_msg)
+
+        assert 6000 in cog_feature._sessions
+        session = cog_feature._sessions[6000]
+        assert session.state == "plan_ready"
+
+        # Thread message should contain the go prompt
+        send_text = mock_thread.send.call_args[0][0]
+        assert "go" in send_text.lower()
+        assert "---PLAN_READY---" not in send_text

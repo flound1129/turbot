@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import anthropic
@@ -27,6 +28,33 @@ _security_policy_cache: str | None = None
 _git_lock: asyncio.Lock = asyncio.Lock()
 REQUEST_COOLDOWN: float = 120.0  # seconds between requests per user
 _last_request: dict[int, float] = {}
+
+SESSION_TIMEOUT: float = 1800.0  # 30 minutes
+
+CONFIRM_PATTERNS: set[str] = {
+    "go", "yes", "proceed", "do it", "looks good", "lgtm", "ship it",
+}
+CANCEL_PATTERNS: set[str] = {
+    "cancel", "stop", "nevermind", "nvm", "abort",
+}
+
+PLAN_READY_MARKER: str = "---PLAN_READY---"
+
+
+@dataclass
+class ThreadSession:
+    thread_id: int
+    user_id: int
+    request_type: str          # "plugin" or "core"
+    original_description: str
+    messages: list[dict[str, str]] = field(default_factory=list)
+    state: str = "discussing"  # "discussing", "plan_ready", "generating", "done"
+    created_at: float = field(default_factory=time.monotonic)
+    last_active: float = field(default_factory=time.monotonic)
+    refined_description: str | None = None
+
+
+_sessions: dict[int, ThreadSession] = {}
 
 
 def _load_security_policy() -> str:
@@ -82,6 +110,23 @@ CORE CHANGE RULES:
 - Follow all best practices in the security policy below.
 
 {security_policy}
+"""
+
+PLANNING_SYSTEM_PROMPT: str = """\
+You are a senior developer evaluating a feature request for a Discord bot called Turbot.
+
+Your job is to have a short conversation with the user to understand what they want, \
+then propose a clear implementation plan.
+
+Guidelines:
+- Assess feasibility and clarity of the request
+- Ask clarifying questions (1-3 at a time, not a wall of questions)
+- Keep responses short and conversational — this is Discord, not a design doc
+- When you have enough information, propose a concise plan summarizing what will be built
+- End your message with the exact marker on its own line when the plan is ready:
+---PLAN_READY---
+
+Do NOT include the marker until you are confident in the plan. Ask questions first if needed.
 """
 
 
@@ -152,6 +197,21 @@ def _format_violations(results: list[policy.ScanResult]) -> str:
     return "\n".join(lines)
 
 
+def _check_session_timeout(session: ThreadSession) -> bool:
+    """Return True if the session has timed out."""
+    return (time.monotonic() - session.last_active) >= SESSION_TIMEOUT
+
+
+def _is_confirmation(text: str) -> bool:
+    """Check if text matches a confirmation pattern."""
+    return text.lower().strip() in CONFIRM_PATTERNS
+
+
+def _is_cancellation(text: str) -> bool:
+    """Check if text matches a cancellation pattern."""
+    return text.lower().strip() in CANCEL_PATTERNS
+
+
 class FeatureRequestCog(commands.Cog):
     """Handles both plugin requests and bot improvement requests."""
 
@@ -162,10 +222,154 @@ class FeatureRequestCog(commands.Cog):
             timeout=anthropic.Timeout(connect=5.0, read=90.0, write=5.0, pool=10.0),
         )
 
+    async def _call_planning_claude(
+        self, session: ThreadSession,
+    ) -> str:
+        """Call Claude with the planning conversation and return the response text."""
+        response = await self.client.messages.create(
+            model=config.PLANNING_MODEL,
+            max_tokens=1024,
+            system=PLANNING_SYSTEM_PROMPT,
+            messages=session.messages,
+        )
+        claude_health.record_success()
+        return response.content[0].text
+
+    async def _handle_thread_message(
+        self, message: discord.Message, session: ThreadSession,
+    ) -> None:
+        """Handle a message in a tracked feature request thread."""
+        # Check timeout
+        if _check_session_timeout(session):
+            await message.channel.send(
+                "This request has timed out. Start a new one in the main channel."
+            )
+            _sessions.pop(session.thread_id, None)
+            return
+
+        # Ignore if not the original requester
+        if message.author.id != session.user_id:
+            return
+
+        # Ignore if generating or done
+        if session.state in ("generating", "done"):
+            return
+
+        session.last_active = time.monotonic()
+        user_text = message.content.strip()
+
+        if session.state == "plan_ready":
+            if _is_confirmation(user_text):
+                session.state = "generating"
+                description = session.refined_description or session.original_description
+                label = (
+                    "Feature request" if session.request_type == "plugin"
+                    else "Bot improvement"
+                )
+                await message.channel.send(
+                    "Generating code changes... this may take a moment."
+                )
+                try:
+                    pr_url = await self._handle_request(
+                        description, session.request_type,
+                    )
+                    session.state = "done"
+                    await message.channel.send(
+                        f"Turbotastic! PR created: {pr_url}"
+                    )
+                    await _log(f"**PR created** for {label.lower()}: {pr_url}")
+                except ValueError as e:
+                    session.state = "done"
+                    await message.channel.send(str(e))
+                    await _log(f"**{label} rejected** (policy violation): {e}")
+                except Exception as e:
+                    session.state = "done"
+                    if is_transient(e):
+                        tripped = claude_health.record_failure()
+                        if tripped:
+                            await _log(
+                                f"**Circuit breaker opened** — Claude API appears "
+                                f"unreachable: {e}"
+                            )
+                        await message.channel.send(
+                            "The Claude API is currently unavailable. "
+                            "Please try again in a few minutes."
+                        )
+                    else:
+                        await message.channel.send(
+                            "Something went wrong while creating the PR. "
+                            "Please try again later."
+                        )
+                finally:
+                    _sessions.pop(session.thread_id, None)
+                return
+
+            if _is_cancellation(user_text):
+                session.state = "done"
+                _sessions.pop(session.thread_id, None)
+                await message.channel.send("Request cancelled.")
+                return
+
+            # Not confirm/cancel — treat as continued discussion
+            session.state = "discussing"
+
+        # State is "discussing" — send to Claude
+        if not claude_health.available:
+            await message.channel.send(
+                "The Claude API is currently unavailable. "
+                "Please try again in a few minutes."
+            )
+            return
+
+        session.messages.append({"role": "user", "content": user_text})
+
+        try:
+            reply_text = await self._call_planning_claude(session)
+        except Exception as e:
+            if is_transient(e):
+                claude_health.record_failure()
+                await message.channel.send(
+                    "The Claude API is currently unavailable. "
+                    "Please try again in a few minutes."
+                )
+            else:
+                await message.channel.send(
+                    "Something went wrong. Please try again."
+                )
+            # Remove the user message we just added since Claude didn't respond
+            session.messages.pop()
+            return
+
+        # Check for plan ready marker
+        if PLAN_READY_MARKER in reply_text:
+            session.state = "plan_ready"
+            # Extract the plan text (everything before the marker) as refined description
+            plan_text = reply_text.split(PLAN_READY_MARKER)[0].strip()
+            session.refined_description = plan_text
+            # Strip the marker before showing to user
+            display_text = reply_text.replace(PLAN_READY_MARKER, "").strip()
+            display_text += (
+                "\n\nReady to generate code! "
+                "Reply **go** to create the PR, or keep chatting to refine the plan."
+            )
+        else:
+            display_text = reply_text
+
+        session.messages.append({"role": "assistant", "content": reply_text})
+        await message.channel.send(display_text)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
+
+        # Check if this is a message in a tracked thread
+        if isinstance(message.channel, discord.Thread):
+            session = _sessions.get(message.channel.id)
+            if session is not None:
+                await self._handle_thread_message(message, session)
+                return
+
         if not self.bot.user or self.bot.user not in message.mentions:
             return
 
@@ -217,21 +421,32 @@ class FeatureRequestCog(commands.Cog):
         # Set cooldown after validation passes — don't burn it on circuit-open rejections
         _last_request[message.author.id] = now
 
-        await message.reply("On it! Generating code changes... this may take a moment.")
-
         await _log(
             f"**{label}** from {message.author} "
             f"in <#{message.channel.id}>: {feature_desc}"
         )
 
+        # Create a thread for the conversation
+        thread = await message.create_thread(
+            name=f"Feature: {feature_desc[:80]}",
+        )
+
+        session = ThreadSession(
+            thread_id=thread.id,
+            user_id=message.author.id,
+            request_type=request_type,
+            original_description=feature_desc,
+        )
+        _sessions[thread.id] = session
+
+        # First planning call
+        session.messages.append({
+            "role": "user",
+            "content": f"{label}: {feature_desc}",
+        })
+
         try:
-            pr_url = await self._handle_request(feature_desc, request_type)
-            await message.reply(f"Turbotastic! PR created: {pr_url}")
-            await _log(f"**PR created** for {label.lower()}: {pr_url}")
-        except ValueError as e:
-            # Policy violations — give user a specific message
-            await message.reply(str(e))
-            await _log(f"**{label} rejected** (policy violation): {e}")
+            reply_text = await self._call_planning_claude(session)
         except Exception as e:
             if is_transient(e):
                 tripped = claude_health.record_failure()
@@ -240,23 +455,33 @@ class FeatureRequestCog(commands.Cog):
                         f"**Circuit breaker opened** — Claude API appears "
                         f"unreachable: {e}"
                     )
-                await message.reply(
-                    "The Claude API is currently unavailable, so I can't process "
-                    "feature requests right now. Please try again in a few minutes."
-                )
-                await _log(
-                    f"**{label} failed** (API unreachable): {e}\n"
-                    f"Request was: {feature_desc}"
+                await thread.send(
+                    "The Claude API is currently unavailable. "
+                    "Please try again in a few minutes."
                 )
             else:
-                await message.reply(
-                    "Something went wrong while creating the PR. "
+                await thread.send(
+                    "Something went wrong while evaluating the request. "
                     "Please try again later."
                 )
-                await _log(
-                    f"**{label} failed**: {e}\n"
-                    f"Request was: {feature_desc}"
-                )
+            _sessions.pop(thread.id, None)
+            return
+
+        # Check for plan ready marker
+        if PLAN_READY_MARKER in reply_text:
+            session.state = "plan_ready"
+            plan_text = reply_text.split(PLAN_READY_MARKER)[0].strip()
+            session.refined_description = plan_text
+            display_text = reply_text.replace(PLAN_READY_MARKER, "").strip()
+            display_text += (
+                "\n\nReady to generate code! "
+                "Reply **go** to create the PR, or keep chatting to refine the plan."
+            )
+        else:
+            display_text = reply_text
+
+        session.messages.append({"role": "assistant", "content": reply_text})
+        await thread.send(display_text)
 
     async def _handle_request(self, description: str, request_type: str) -> str:
         """Generate code changes and create a PR."""
