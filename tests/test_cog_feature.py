@@ -13,6 +13,26 @@ from api_health import ClaudeHealth
 import cog_feature
 
 
+def _make_author(
+    *,
+    is_bot: bool = False,
+    user_id: int = 55555,
+    has_role: bool = False,
+    role_name: str = "BotAdmin",
+) -> MagicMock:
+    """Create a mock author that passes isinstance(author, discord.Member)."""
+    author = MagicMock(spec=discord.Member)
+    author.bot = is_bot
+    author.id = user_id
+    if has_role:
+        role = MagicMock()
+        role.name = role_name
+        author.roles = [role]
+    else:
+        author.roles = []
+    return author
+
+
 class TestReadProjectFiles:
     def test_reads_py_files(self, tmp_path: str) -> None:
         py_file = tmp_path / "test.py"
@@ -92,12 +112,13 @@ class TestFeatureRequestCog:
         mentioned: bool = True,
     ) -> tuple[MagicMock, MagicMock]:
         message = AsyncMock()
-        message.author.bot = is_bot
-        message.author.id = 55555
         message.content = content
+        message.channel = MagicMock()  # Plain mock — NOT a discord.Thread
         message.channel.id = 12345
-        message.channel.__class__ = discord.TextChannel
         message.reply = AsyncMock()
+        message.author = _make_author(
+            is_bot=is_bot, has_role=has_role, role_name=role_name,
+        )
 
         # Mock thread creation
         mock_thread = AsyncMock()
@@ -112,16 +133,6 @@ class TestFeatureRequestCog:
             message.mentions = [bot_user]
         else:
             message.mentions = []
-
-        if has_role:
-            role = MagicMock()
-            role.name = role_name
-
-            message.author.__class__ = discord.Member
-            message.author.roles = [role]
-        else:
-            message.author.__class__ = discord.Member
-            message.author.roles = []
 
         return message, bot_user
 
@@ -170,8 +181,7 @@ class TestFeatureRequestCog:
         mock_bot.user = bot_user
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
-        with patch("cog_feature.isinstance", side_effect=lambda obj, cls: True):
-            await cog.on_message(message)
+        await cog.on_message(message)
 
         message.reply.assert_called_once()
         reply_text = message.reply.call_args[0][0]
@@ -187,8 +197,7 @@ class TestFeatureRequestCog:
         mock_bot.user = bot_user
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
-        with patch("cog_feature.isinstance", side_effect=lambda obj, cls: True):
-            await cog.on_message(message)
+        await cog.on_message(message)
 
         calls = [str(c) for c in message.reply.call_args_list]
         assert any("describe the feature" in c.lower() for c in calls)
@@ -213,7 +222,6 @@ class TestFeatureRequestCog:
         )]
 
         with (
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_response,
@@ -261,7 +269,6 @@ class TestFeatureRequestCog:
         )]
 
         with (
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_response,
@@ -394,12 +401,11 @@ class TestRateLimiting:
 
     def _make_message(self) -> tuple[MagicMock, MagicMock]:
         message = AsyncMock()
-        message.author.bot = False
-        message.author.id = 77777
         message.content = "<@99999> feature request: add a joke command"
+        message.channel = MagicMock()
         message.channel.id = 12345
-        message.channel.__class__ = discord.TextChannel
         message.reply = AsyncMock()
+        message.author = _make_author(user_id=77777, has_role=True)
 
         mock_thread = AsyncMock()
         mock_thread.id = 99900
@@ -409,11 +415,6 @@ class TestRateLimiting:
         bot_user = MagicMock()
         bot_user.id = 99999
         message.mentions = [bot_user]
-
-        role = MagicMock()
-        role.name = "BotAdmin"
-        message.author.__class__ = discord.Member
-        message.author.roles = [role]
 
         return message, bot_user
 
@@ -429,10 +430,7 @@ class TestRateLimiting:
         # Simulate a recent request from this user
         cog_feature._last_request[77777] = time.monotonic()
 
-        with (
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
-            patch.object(cog.client.messages, "create", new_callable=AsyncMock) as mock_create,
-        ):
+        with patch.object(cog.client.messages, "create", new_callable=AsyncMock) as mock_create:
             await cog.on_message(message)
 
         mock_create.assert_not_called()
@@ -457,7 +455,6 @@ class TestRateLimiting:
         planning_response.content = [MagicMock(text="Let me evaluate this request.")]
 
         with (
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
             patch.object(
                 cog.client.messages, "create",
@@ -550,11 +547,11 @@ class TestCogCircuitBreaker:
         has_role: bool = True,
     ) -> tuple[MagicMock, MagicMock]:
         message = AsyncMock()
-        message.author.bot = False
         message.content = content
+        message.channel = MagicMock()
         message.channel.id = 12345
-        message.channel.__class__ = discord.TextChannel
         message.reply = AsyncMock()
+        message.author = _make_author(has_role=has_role)
 
         mock_thread = AsyncMock()
         mock_thread.id = 99900
@@ -564,15 +561,6 @@ class TestCogCircuitBreaker:
         bot_user = MagicMock()
         bot_user.id = 99999
         message.mentions = [bot_user]
-
-        if has_role:
-            role = MagicMock()
-            role.name = "BotAdmin"
-            message.author.__class__ = discord.Member
-            message.author.roles = [role]
-        else:
-            message.author.__class__ = discord.Member
-            message.author.roles = []
 
         return message, bot_user
 
@@ -590,7 +578,6 @@ class TestCogCircuitBreaker:
 
         with (
             patch("cog_feature.claude_health", health),
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(cog.client.messages, "create") as mock_create,
         ):
             await cog.on_message(message)
@@ -649,7 +636,6 @@ class TestCogCircuitBreaker:
 
         with (
             patch("cog_feature.claude_health", health),
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, side_effect=anthropic.APITimeoutError(request=None),
@@ -1071,12 +1057,11 @@ class TestThreadConversation:
 
         # Step 1: Initial feature request triggers thread creation
         initial_msg = AsyncMock()
-        initial_msg.author.bot = False
-        initial_msg.author.id = 111
         initial_msg.content = "<@99999> feature request: add a leaderboard"
+        initial_msg.channel = MagicMock()
         initial_msg.channel.id = 12345
-        initial_msg.channel.__class__ = discord.TextChannel
         initial_msg.reply = AsyncMock()
+        initial_msg.author = _make_author(user_id=111, has_role=True)
 
         mock_thread = AsyncMock()
         mock_thread.id = 5000
@@ -1084,17 +1069,11 @@ class TestThreadConversation:
         initial_msg.create_thread = AsyncMock(return_value=mock_thread)
         initial_msg.mentions = [mock_bot.user]
 
-        role = MagicMock()
-        role.name = "BotAdmin"
-        initial_msg.author.__class__ = discord.Member
-        initial_msg.author.roles = [role]
-
         # Planning response asks clarifying questions
         planning_resp1 = MagicMock()
         planning_resp1.content = [MagicMock(text="What metrics should the leaderboard track?")]
 
         with (
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_resp1,
@@ -1145,31 +1124,22 @@ class TestThreadConversation:
     @pytest.mark.asyncio
     async def test_initial_plan_ready_on_first_call(self) -> None:
         """If Claude returns PLAN_READY on first message, state goes to plan_ready."""
-        cog_feature._sessions.clear()
-        cog_feature._last_request.clear()
-
         mock_bot = MagicMock()
         mock_bot.user = MagicMock(id=99999)
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
         initial_msg = AsyncMock()
-        initial_msg.author.bot = False
-        initial_msg.author.id = 111
         initial_msg.content = "<@99999> feature request: add a simple ping command"
+        initial_msg.channel = MagicMock()
         initial_msg.channel.id = 12345
-        initial_msg.channel.__class__ = discord.TextChannel
         initial_msg.reply = AsyncMock()
         initial_msg.mentions = [mock_bot.user]
+        initial_msg.author = _make_author(user_id=111, has_role=True)
 
         mock_thread = AsyncMock()
         mock_thread.id = 6000
         mock_thread.send = AsyncMock()
         initial_msg.create_thread = AsyncMock(return_value=mock_thread)
-
-        role = MagicMock()
-        role.name = "BotAdmin"
-        initial_msg.author.__class__ = discord.Member
-        initial_msg.author.roles = [role]
 
         # Claude immediately proposes a plan
         planning_resp = MagicMock()
@@ -1178,7 +1148,6 @@ class TestThreadConversation:
         )]
 
         with (
-            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_resp,
