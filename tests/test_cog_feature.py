@@ -230,6 +230,11 @@ class TestFeatureRequestCog:
         ):
             await cog.on_message(message)
 
+        # Diagnostic: if on_message exited early with a reply, show what it said
+        assert not message.reply.called, (
+            f"on_message sent unexpected reply: {message.reply.call_args_list}"
+        )
+
         # Thread should have been created
         message.create_thread.assert_called_once()
         thread_name = message.create_thread.call_args[1]["name"]

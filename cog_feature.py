@@ -364,11 +364,10 @@ class FeatureRequestCog(commands.Cog):
             return
 
         # Check if this is a message in a tracked thread
-        if isinstance(message.channel, discord.Thread):
-            session = _sessions.get(message.channel.id)
-            if session is not None:
-                await self._handle_thread_message(message, session)
-                return
+        session = _sessions.get(message.channel.id)
+        if session is not None:
+            await self._handle_thread_message(message, session)
+            return
 
         if not self.bot.user or self.bot.user not in message.mentions:
             return
@@ -383,10 +382,8 @@ class FeatureRequestCog(commands.Cog):
 
         # Role check
         required_role = config.FEATURE_REQUEST_ROLE
-        if isinstance(message.author, discord.Member):
-            has_role = any(r.name == required_role for r in message.author.roles)
-        else:
-            has_role = False
+        roles = getattr(message.author, 'roles', ())
+        has_role = any(r.name == required_role for r in roles)
 
         if not has_role:
             await message.reply(
