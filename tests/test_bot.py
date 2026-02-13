@@ -134,6 +134,118 @@ class TestWebhookHandler:
                 os.remove(bot.DEPLOY_SIGNAL)
 
 
+class TestOnReady:
+    """Tests for on_ready status file handling."""
+
+    @pytest.mark.asyncio
+    async def test_deploy_success_status(self, tmp_path: str) -> None:
+        """on_ready logs deploy success when .status has deploy_success event."""
+        status_path = os.path.join(str(tmp_path), ".status")
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump({"event": "deploy_success", "commit": "abc123def456"}, f)
+
+        with (
+            patch.object(bot, "STATUS_FILE", status_path),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
+        ):
+            await bot.on_ready()
+
+        mock_log.assert_called_once()
+        msg = mock_log.call_args[0][0]
+        assert "Deploy successful" in msg
+        assert "abc123de" in msg
+        assert not os.path.exists(status_path)
+
+    @pytest.mark.asyncio
+    async def test_rollback_status(self, tmp_path: str) -> None:
+        """on_ready logs rollback when .status has rollback event."""
+        status_path = os.path.join(str(tmp_path), ".status")
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "event": "rollback",
+                "bad_commit": "bad12345",
+                "good_commit": "good6789",
+            }, f)
+
+        with (
+            patch.object(bot, "STATUS_FILE", status_path),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
+        ):
+            await bot.on_ready()
+
+        msg = mock_log.call_args[0][0]
+        assert "Rolled back" in msg
+        assert "bad12345" in msg
+        assert "good6789" in msg
+        assert not os.path.exists(status_path)
+
+    @pytest.mark.asyncio
+    async def test_deploy_pull_failed_status(self, tmp_path: str) -> None:
+        """on_ready logs deploy failure when .status has deploy_pull_failed event."""
+        status_path = os.path.join(str(tmp_path), ".status")
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "event": "deploy_pull_failed",
+                "error": "merge conflict",
+                "good_commit": "good6789",
+            }, f)
+
+        with (
+            patch.object(bot, "STATUS_FILE", status_path),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
+        ):
+            await bot.on_ready()
+
+        msg = mock_log.call_args[0][0]
+        assert "Deploy failed" in msg
+        assert "merge conflict" in msg
+        assert "good6789" in msg
+
+    @pytest.mark.asyncio
+    async def test_restart_status(self, tmp_path: str) -> None:
+        """on_ready logs restart when .status has restart event."""
+        status_path = os.path.join(str(tmp_path), ".status")
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump({"event": "restart"}, f)
+
+        with (
+            patch.object(bot, "STATUS_FILE", status_path),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
+        ):
+            await bot.on_ready()
+
+        msg = mock_log.call_args[0][0]
+        assert "Restarted" in msg
+
+    @pytest.mark.asyncio
+    async def test_no_status_file_logs_online(self, tmp_path: str) -> None:
+        """on_ready logs online message when no .status file exists."""
+        status_path = os.path.join(str(tmp_path), ".status")
+
+        with (
+            patch.object(bot, "STATUS_FILE", status_path),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
+        ):
+            await bot.on_ready()
+
+        msg = mock_log.call_args[0][0]
+        assert "online" in msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_corrupt_status_file_does_not_crash(self, tmp_path: str) -> None:
+        """on_ready handles corrupt .status file without crashing."""
+        status_path = os.path.join(str(tmp_path), ".status")
+        with open(status_path, "w", encoding="utf-8") as f:
+            f.write("not valid json{{{")
+
+        with (
+            patch.object(bot, "STATUS_FILE", status_path),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            # Should not raise
+            await bot.on_ready()
+
+
 class TestChannelHistory:
     def test_history_is_per_channel(self) -> None:
         bot.channel_history.clear()

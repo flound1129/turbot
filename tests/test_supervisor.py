@@ -156,6 +156,60 @@ class TestMainLoop:
 
             supervisor.shutting_down = False
 
+    def test_deploy_rollback_on_crash_within_health_timeout(self, tmp_path: str) -> None:
+        """Bot crashes within health timeout after deploy — should rollback."""
+        deploy_path = os.path.join(str(tmp_path), ".deploy")
+        status_path = os.path.join(str(tmp_path), ".status")
+
+        # Create the deploy signal
+        with open(deploy_path, "w", encoding="utf-8") as f:
+            f.write("deploy")
+
+        call_count = 0
+
+        def mock_popen(*args: object, **kwargs: object) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            proc = MagicMock()
+            if call_count == 1:
+                # First bot run — exits normally (triggers deploy check)
+                proc.wait.return_value = None
+                proc.returncode = 0
+            elif call_count == 2:
+                # Health check bot — crashes immediately (within timeout)
+                proc.wait.return_value = None
+                proc.returncode = 1
+            else:
+                # After rollback, shut down
+                proc.wait.return_value = None
+                proc.returncode = 0
+                supervisor.shutting_down = True
+            return proc
+
+        with (
+            patch.object(supervisor, "DEPLOY_SIGNAL", deploy_path),
+            patch.object(supervisor, "STATUS_FILE", status_path),
+            patch.object(supervisor, "log"),
+            patch.object(supervisor, "get_current_commit", return_value="abc123"),
+            patch.object(supervisor, "run_git"),
+            patch.object(supervisor, "install_deps"),
+            patch.object(supervisor, "rollback") as mock_rollback,
+            patch.object(subprocess, "Popen", side_effect=mock_popen),
+            patch("time.sleep"),
+        ):
+            supervisor.main()
+            supervisor.shutting_down = False
+
+        # Should have rolled back to the known good commit
+        mock_rollback.assert_called_once_with("abc123")
+
+        # Status file should reflect the rollback
+        assert os.path.exists(status_path)
+        with open(status_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert data["event"] == "rollback"
+        assert data["good_commit"] == "abc123"
+
     def test_normal_restart_on_crash(self, tmp_path: str) -> None:
         """Bot crashes without deploy signal — should restart after delay."""
         status_path = os.path.join(str(tmp_path), ".status")
