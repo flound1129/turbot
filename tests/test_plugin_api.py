@@ -181,6 +181,10 @@ class TestStoreKeyValidation:
         with pytest.raises(ValueError, match="Invalid store key"):
             plugin_api._validate_store_key(".secret")
 
+    def test_rejects_empty_key(self) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            plugin_api._validate_store_key("")
+
     def test_accepts_valid_key(self) -> None:
         # Should not raise
         plugin_api._validate_store_key("my_key")

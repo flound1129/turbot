@@ -385,6 +385,146 @@ class TestFormatViolations:
         assert "banned-builtin" in output
 
 
+class TestRateLimiting:
+    """Tests for per-user request cooldown."""
+
+    def _make_message(self) -> tuple[MagicMock, MagicMock]:
+        message = AsyncMock()
+        message.author.bot = False
+        message.author.id = 77777
+        message.content = "<@99999> feature request: add a joke command"
+        message.channel.id = 12345
+        message.reply = AsyncMock()
+
+        bot_user = MagicMock()
+        bot_user.id = 99999
+        message.mentions = [bot_user]
+
+        role = MagicMock()
+        role.name = "BotAdmin"
+        import discord
+        message.author.__class__ = discord.Member
+        message.author.roles = [role]
+
+        return message, bot_user
+
+    @pytest.mark.asyncio
+    async def test_rejects_request_within_cooldown(self) -> None:
+        """Second request within cooldown is rejected."""
+        cog_feature._last_request.clear()
+        message, bot_user = self._make_message()
+        mock_bot = MagicMock()
+        mock_bot.user = bot_user
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        # Simulate a recent request from this user
+        import time
+        cog_feature._last_request[77777] = time.monotonic()
+
+        with (
+            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock) as mock_create,
+        ):
+            await cog.on_message(message)
+
+        mock_create.assert_not_called()
+        reply_calls = [str(c) for c in message.reply.call_args_list]
+        assert any("wait" in c.lower() for c in reply_calls)
+        cog_feature._last_request.clear()
+
+    @pytest.mark.asyncio
+    async def test_allows_request_after_cooldown(self) -> None:
+        """Request after cooldown period is allowed."""
+        cog_feature._last_request.clear()
+        message, bot_user = self._make_message()
+        mock_bot = MagicMock()
+        mock_bot.user = bot_user
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        # Simulate a request from long ago
+        import time
+        cog_feature._last_request[77777] = time.monotonic() - 999
+
+        with (
+            patch("cog_feature.isinstance", side_effect=lambda obj, cls: True),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch.object(cog, "_handle_request", new_callable=AsyncMock, return_value="https://github.com/pr/1"),
+        ):
+            await cog.on_message(message)
+
+        reply_calls = [str(c) for c in message.reply.call_args_list]
+        assert any("Turbotastic" in c for c in reply_calls)
+        cog_feature._last_request.clear()
+
+
+class TestHandleRequestValidation:
+    """Tests for Claude response validation in _handle_request."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_raises_value_error(self) -> None:
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text="not valid json at all")]
+
+        with (
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+        ):
+            with pytest.raises(ValueError, match="invalid JSON"):
+                await cog._handle_request("add something", "plugin")
+
+    @pytest.mark.asyncio
+    async def test_missing_changes_key_raises_value_error(self) -> None:
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({"summary": "no changes key"}))]
+
+        with (
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+        ):
+            with pytest.raises(ValueError, match="unexpected response"):
+                await cog._handle_request("add something", "plugin")
+
+
+class TestGitCleanup:
+    """Tests for git state cleanup on failure."""
+
+    @pytest.mark.asyncio
+    async def test_git_checkout_on_push_failure(self) -> None:
+        """Git state is cleaned up if commit_and_push fails."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{"path": "plugins/test.py", "action": "create", "content": "import json\n"}],
+            "summary": "Test",
+            "title": "Test",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create", new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch("github_ops.create_branch", new_callable=AsyncMock, return_value="feature/test"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock, side_effect=RuntimeError("push failed")),
+            patch("github_ops._run", new_callable=AsyncMock) as mock_git_run,
+        ):
+            with pytest.raises(RuntimeError, match="push failed"):
+                await cog._handle_request("test feature", "plugin")
+
+        # Verify cleanup happened — git checkout -f main was called
+        mock_git_run.assert_called_with(["git", "checkout", "-f", "main"])
+
+
 class TestCogCircuitBreaker:
     """Tests for circuit breaker integration in FeatureRequestCog."""
 

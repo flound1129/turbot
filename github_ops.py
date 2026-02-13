@@ -81,7 +81,10 @@ async def open_pr(branch: str, title: str, body: str) -> str:
         "--body", body,
     ])
     # gh pr create prints the PR URL as the last line
-    return result.strip().splitlines()[-1]
+    lines = result.strip().splitlines()
+    if not lines:
+        raise RuntimeError("No PR URL returned by 'gh pr create'")
+    return lines[-1]
 
 
 async def get_current_commit() -> str:

@@ -191,17 +191,68 @@ class TestLogToAdmin:
 class TestOnMessageSkipsPrefixes:
     """Test that on_message in bot.py skips feature request and bot improvement messages."""
 
-    def test_skip_feature_request_prefix(self) -> None:
-        # Verify the string is in the skip tuple
-        # We test this by checking the source code has the right tuple
-        import inspect
-        source = inspect.getsource(bot)
-        assert 'startswith(("feature request:", "bot improvement:"))' in source
+    def _make_message(self, content: str, bot_user: MagicMock) -> MagicMock:
+        message = AsyncMock()
+        message.author.bot = False
+        message.content = content
+        message.channel.id = 42
+        message.reply = AsyncMock()
+        message.mentions = [bot_user]
+        return message
 
-    def test_skip_bot_improvement_prefix(self) -> None:
-        import inspect
-        source = inspect.getsource(bot)
-        assert "bot improvement:" in source
+    @pytest.mark.asyncio
+    async def test_skip_feature_request_prefix(self) -> None:
+        bot_user = MagicMock(id=99999)
+        message = self._make_message("<@99999> feature request: add ping", bot_user)
+        with (
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
+        ):
+            await bot.on_message(message)
+        mock_create.assert_not_called()
+        message.reply.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_bot_improvement_prefix(self) -> None:
+        bot_user = MagicMock(id=99999)
+        message = self._make_message("<@99999> bot improvement: fix bug", bot_user)
+        with (
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
+        ):
+            await bot.on_message(message)
+        mock_create.assert_not_called()
+        message.reply.assert_not_called()
+
+
+class TestSplitReply:
+    def test_short_message_not_split(self) -> None:
+        assert bot._split_reply("hello") == ["hello"]
+
+    def test_empty_string(self) -> None:
+        assert bot._split_reply("") == []
+
+    def test_splits_at_space(self) -> None:
+        text = "a" * 1995 + " " + "b" * 100
+        chunks = bot._split_reply(text)
+        assert len(chunks) == 2
+        assert len(chunks[0]) <= 2000
+        assert "".join(chunks) == text
+
+    def test_splits_at_newline(self) -> None:
+        text = "a" * 1995 + "\n" + "b" * 100
+        chunks = bot._split_reply(text)
+        assert len(chunks) == 2
+        assert len(chunks[0]) <= 2000
+
+    def test_hard_cut_when_no_break_point(self) -> None:
+        text = "a" * 3000
+        chunks = bot._split_reply(text)
+        assert len(chunks) == 2
+        assert chunks[0] == "a" * 2000
+        assert chunks[1] == "a" * 1000
 
 
 class TestPluginAutoLoading:

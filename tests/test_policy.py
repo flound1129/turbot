@@ -146,6 +146,40 @@ class TestScanChanges:
         assert len(results[0].violations) >= 2
 
 
+class TestDynamicDunderAccess:
+    """Tests for getattr/setattr/delattr with banned dunder strings."""
+
+    def test_getattr_with_banned_dunder(self) -> None:
+        source = 'x = getattr(obj, "__globals__")\n'
+        result = policy.scan_source(source)
+        assert not result.ok
+        assert result.violations[0].rule == "banned-dunder-access"
+
+    def test_setattr_with_banned_dunder(self) -> None:
+        source = 'setattr(obj, "__code__", val)\n'
+        result = policy.scan_source(source)
+        assert not result.ok
+        assert result.violations[0].rule == "banned-dunder-access"
+
+    def test_delattr_with_banned_dunder(self) -> None:
+        source = 'delattr(obj, "__class__")\n'
+        result = policy.scan_source(source)
+        assert not result.ok
+        assert result.violations[0].rule == "banned-dunder-access"
+
+    def test_getattr_with_safe_string(self) -> None:
+        source = 'x = getattr(obj, "name")\n'
+        result = policy.scan_source(source)
+        assert result.ok
+
+    def test_getattr_with_variable(self) -> None:
+        """Dynamic access via variable can't be caught statically — should pass."""
+        source = 'attr = "__globals__"\nx = getattr(obj, attr)\n'
+        result = policy.scan_source(source)
+        # Only the variable assignment is visible, not the getattr target
+        assert result.ok
+
+
 class TestScanResult:
     def test_ok_property_true_when_no_violations(self) -> None:
         result = policy.ScanResult(path="test.py", violations=[])

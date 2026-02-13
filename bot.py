@@ -46,6 +46,26 @@ async def log_to_admin(msg: str) -> None:
             print(f"Failed to send to admin channel: {e}")
 
 
+def _split_reply(text: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
+    """Split text into chunks that respect word boundaries."""
+    chunks: list[str] = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        # Find a good split point (prefer newline, then space)
+        split_at = text.rfind("\n", 0, limit)
+        if split_at <= 0:
+            split_at = text.rfind(" ", 0, limit)
+        if split_at <= 0:
+            split_at = limit  # No good break point — hard cut
+        else:
+            split_at += 1  # Include the delimiter in the current chunk
+        chunks.append(text[:split_at])
+        text = text[split_at:]
+    return chunks
+
+
 @bot.event
 async def on_ready() -> None:
     print(f"Turbot is online as {bot.user} — feeling Turbotastic!")
@@ -131,7 +151,7 @@ async def on_message(message: discord.Message) -> None:
 
     try:
         response = await claude.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model=config.CLAUDE_MODEL,
             max_tokens=1024,
             system=(
                 "You are Turbot, a friendly and helpful Discord bot. "
@@ -151,8 +171,7 @@ async def on_message(message: discord.Message) -> None:
             history[:] = history[-MAX_HISTORY:]
 
         # Split long replies to respect Discord's 2000-char limit
-        while reply:
-            chunk, reply = reply[:DISCORD_MSG_LIMIT], reply[DISCORD_MSG_LIMIT:]
+        for chunk in _split_reply(reply):
             await message.reply(chunk)
 
     except Exception as e:
@@ -167,7 +186,7 @@ async def on_message(message: discord.Message) -> None:
                 "I'll keep trying to reconnect — check back in a few minutes!"
             )
         else:
-            await message.reply(f"Blub... something went wrong: {e}")
+            await message.reply("Blub... something went wrong. Please try again later.")
         await log_to_admin(f"**Chat error** in <#{message.channel.id}>: {e}")
 
 

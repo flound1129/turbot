@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import time
 from typing import TYPE_CHECKING
 
 import anthropic
@@ -21,6 +23,10 @@ PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 SECURITY_POLICY_PATH: str = os.path.join(PROJECT_DIR, "SECURITY_POLICY.md")
 
 _security_policy_cache: str | None = None
+
+_git_lock: asyncio.Lock = asyncio.Lock()
+REQUEST_COOLDOWN: float = 120.0  # seconds between requests per user
+_last_request: dict[int, float] = {}
 
 
 def _load_security_policy() -> str:
@@ -189,6 +195,17 @@ class FeatureRequestCog(commands.Cog):
             await message.reply("Please describe the feature after the request prefix.")
             return
 
+        # Per-user cooldown
+        now = time.monotonic()
+        last = _last_request.get(message.author.id, 0.0)
+        if now - last < REQUEST_COOLDOWN:
+            remaining = int(REQUEST_COOLDOWN - (now - last))
+            await message.reply(
+                f"Please wait {remaining} seconds before submitting another request."
+            )
+            return
+        _last_request[message.author.id] = now
+
         label = "Feature request" if request_type == "plugin" else "Bot improvement"
 
         if not claude_health.available:
@@ -231,7 +248,8 @@ class FeatureRequestCog(commands.Cog):
                 )
             else:
                 await message.reply(
-                    f"Something went wrong while creating the PR: {e}"
+                    "Something went wrong while creating the PR. "
+                    "Please try again later."
                 )
                 await _log(
                     f"**{label} failed**: {e}\n"
@@ -254,7 +272,7 @@ class FeatureRequestCog(commands.Cog):
             codebase_text += f"\n--- {path} ---\n{content}\n"
 
         response = await self.client.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model=config.CLAUDE_MODEL,
             max_tokens=4096,
             system=system_prompt,
             messages=[{
@@ -271,9 +289,17 @@ class FeatureRequestCog(commands.Cog):
         # Strip markdown fences if Claude added them despite instructions
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        result: dict[str, object] = json.loads(raw)
+        try:
+            result: dict[str, object] = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Claude returned invalid JSON: {exc}") from exc
+
+        if not isinstance(result, dict) or "changes" not in result:
+            raise ValueError("Claude returned an unexpected response format.")
 
         changes: list[dict[str, str]] = result["changes"]
+        if not isinstance(changes, list):
+            raise ValueError("Claude returned an unexpected response format.")
         summary: str = result.get("summary", description)
         title: str = result.get("title", f"Feature: {description[:50]}")
 
@@ -299,14 +325,19 @@ class FeatureRequestCog(commands.Cog):
                 + summary
             )
 
-        branch = await github_ops.create_branch(description[:40])
-        github_ops.apply_changes(changes)
-        changed_paths = [change["path"] for change in changes]
-        await github_ops.commit_and_push(branch, summary, paths=changed_paths)
-        pr_url = await github_ops.open_pr(branch, title, pr_body)
-
-        # Return to main so the working tree is clean for the bot
-        await github_ops._run(["git", "checkout", "main"])
+        async with _git_lock:
+            branch = await github_ops.create_branch(description[:40])
+            try:
+                github_ops.apply_changes(changes)
+                changed_paths = [change["path"] for change in changes]
+                await github_ops.commit_and_push(branch, summary, paths=changed_paths)
+                pr_url = await github_ops.open_pr(branch, title, pr_body)
+            finally:
+                # Always return to main, even on failure
+                try:
+                    await github_ops._run(["git", "checkout", "-f", "main"])
+                except Exception:
+                    pass
 
         # Warn admin about core changes
         if is_core_change:

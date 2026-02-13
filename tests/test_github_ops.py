@@ -154,6 +154,15 @@ class TestOpenPr:
             assert url == "https://github.com/user/repo/pull/42"
 
     @pytest.mark.asyncio
+    async def test_raises_on_empty_output(self) -> None:
+        with patch.object(
+            github_ops, "_run", new_callable=AsyncMock,
+            return_value="",
+        ):
+            with pytest.raises(RuntimeError, match="No PR URL"):
+                await github_ops.open_pr("feature/test", "title", "body")
+
+    @pytest.mark.asyncio
     async def test_extracts_last_line(self) -> None:
         with patch.object(
             github_ops, "_run", new_callable=AsyncMock,

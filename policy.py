@@ -23,6 +23,8 @@ BANNED_DUNDER_ATTRS: frozenset[str] = frozenset({
     "__subclasses__", "__globals__", "__builtins__", "__code__", "__class__",
 })
 
+DYNAMIC_DUNDER_FUNCS: frozenset[str] = frozenset({"getattr", "setattr", "delattr"})
+
 
 @dataclass
 class Violation:
@@ -89,6 +91,24 @@ class _PolicyVisitor(ast.NodeVisitor):
                 col=node.col_offset,
                 rule="banned-builtin",
                 detail=f"Call to '{name}()' is forbidden in plugins",
+            ))
+        # Check for dynamic dunder access via getattr/setattr/delattr
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in DYNAMIC_DUNDER_FUNCS
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in BANNED_DUNDER_ATTRS
+        ):
+            self.violations.append(Violation(
+                line=node.lineno,
+                col=node.col_offset,
+                rule="banned-dunder-access",
+                detail=(
+                    f"Dynamic access to '{node.args[1].value}' via "
+                    f"{node.func.id}() is forbidden in plugins"
+                ),
             ))
         self.generic_visit(node)
 

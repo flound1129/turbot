@@ -22,6 +22,8 @@ DATA_DIR: str = os.path.join(PROJECT_DIR, "data")
 
 def _validate_store_key(key: str) -> None:
     """Reject store keys that could escape the plugin's data directory."""
+    if not key:
+        raise ValueError("Store key must not be empty")
     if os.sep in key or (os.altsep and os.altsep in key) or "/" in key or "\\" in key:
         raise ValueError(f"Invalid store key: {key!r}")
     if key in (".", "..") or key.startswith("."):
