@@ -205,9 +205,6 @@ class TestFeatureRequestCog:
     @pytest.mark.asyncio
     async def test_successful_plugin_request_creates_thread(self) -> None:
         """Feature request creates a thread and starts planning conversation."""
-        cog_feature._sessions.clear()
-        cog_feature._last_request.clear()
-
         message, bot_user = self._make_message(
             "<@99999> feature request: add a ping command",
             has_role=True,
@@ -222,7 +219,10 @@ class TestFeatureRequestCog:
             text="Interesting! A few questions:\n1. What should !ping respond with?"
         )]
 
+        sessions_dict: dict = {}
         with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", sessions_dict),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_response,
@@ -231,39 +231,26 @@ class TestFeatureRequestCog:
         ):
             await cog.on_message(message)
 
-        # Diagnostic: show what happened
-        assert not message.reply.called, (
-            f"on_message sent unexpected reply: {message.reply.call_args_list}, "
-            f"_last_request={cog_feature._last_request!r}, "
-            f"author.id={message.author.id!r} (type={type(message.author.id).__name__}), "
-            f"_sessions={cog_feature._sessions!r}, "
-            f"channel.id={message.channel.id!r} (type={type(message.channel.id).__name__})"
-        )
+            # Thread should have been created
+            message.create_thread.assert_called_once()
+            thread_name = message.create_thread.call_args[1]["name"]
+            assert "add a ping command" in thread_name
 
-        # Thread should have been created
-        message.create_thread.assert_called_once()
-        thread_name = message.create_thread.call_args[1]["name"]
-        assert "add a ping command" in thread_name
+            # Planning response should have been sent to thread
+            mock_thread = message.create_thread.return_value
+            mock_thread.send.assert_called_once()
+            send_text = mock_thread.send.call_args[0][0]
+            assert "questions" in send_text.lower()
 
-        # Planning response should have been sent to thread
-        mock_thread = message.create_thread.return_value
-        mock_thread.send.assert_called_once()
-        send_text = mock_thread.send.call_args[0][0]
-        assert "questions" in send_text.lower()
-
-        # Session should be tracked
-        assert 99900 in cog_feature._sessions
-        session = cog_feature._sessions[99900]
-        assert session.state == "discussing"
-        assert session.request_type == "plugin"
-        cog_feature._sessions.clear()
-        cog_feature._last_request.clear()
+            # Session should be tracked
+            assert 99900 in cog_feature._sessions
+            session = cog_feature._sessions[99900]
+            assert session.state == "discussing"
+            assert session.request_type == "plugin"
 
     @pytest.mark.asyncio
     async def test_successful_core_request_creates_thread(self) -> None:
         """Bot improvement request creates a thread and starts planning."""
-        cog_feature._sessions.clear()
-        cog_feature._last_request.clear()
         message, bot_user = self._make_message(
             "<@99999> bot improvement: fix a bug in bot.py",
             has_role=True,
@@ -279,6 +266,8 @@ class TestFeatureRequestCog:
         )]
 
         with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_response,
@@ -287,12 +276,10 @@ class TestFeatureRequestCog:
         ):
             await cog.on_message(message)
 
-        message.create_thread.assert_called_once()
-        assert 99900 in cog_feature._sessions
-        session = cog_feature._sessions[99900]
-        assert session.request_type == "core"
-        cog_feature._sessions.clear()
-        cog_feature._last_request.clear()
+            message.create_thread.assert_called_once()
+            assert 99900 in cog_feature._sessions
+            session = cog_feature._sessions[99900]
+            assert session.request_type == "core"
 
 
 class TestPolicyViolationRejectspr:
@@ -587,6 +574,8 @@ class TestCogCircuitBreaker:
             health.record_failure()
 
         with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
             patch("cog_feature.claude_health", health),
             patch.object(cog.client.messages, "create") as mock_create,
         ):
@@ -635,8 +624,6 @@ class TestCogCircuitBreaker:
     @pytest.mark.asyncio
     async def test_records_failure_on_connectivity_error(self) -> None:
         """Connectivity error during planning triggers circuit breaker."""
-        cog_feature._sessions.clear()
-        cog_feature._last_request.clear()
         message, bot_user = self._make_message()
         mock_bot = MagicMock()
         mock_bot.user = bot_user
@@ -645,6 +632,8 @@ class TestCogCircuitBreaker:
         health = ClaudeHealth()
 
         with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
             patch("cog_feature.claude_health", health),
             patch.object(
                 cog.client.messages, "create",
@@ -659,8 +648,6 @@ class TestCogCircuitBreaker:
         mock_thread = message.create_thread.return_value
         send_calls = [str(c) for c in mock_thread.send.call_args_list]
         assert any("unavailable" in c.lower() for c in send_calls)
-        cog_feature._sessions.clear()
-        cog_feature._last_request.clear()
 
 
 class TestPlanningSystemPrompt:
@@ -1065,6 +1052,10 @@ class TestThreadConversation:
         mock_bot.user = MagicMock(id=99999)
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
+        # Shared dicts that persist across all 3 on_message calls
+        sessions_dict: dict = {}
+        last_req_dict: dict = {}
+
         # Step 1: Initial feature request triggers thread creation
         initial_msg = AsyncMock()
         initial_msg.content = "<@99999> feature request: add a leaderboard"
@@ -1084,6 +1075,8 @@ class TestThreadConversation:
         planning_resp1.content = [MagicMock(text="What metrics should the leaderboard track?")]
 
         with (
+            patch.object(cog_feature, "_last_request", last_req_dict),
+            patch.object(cog_feature, "_sessions", sessions_dict),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_resp1,
@@ -1092,9 +1085,9 @@ class TestThreadConversation:
         ):
             await cog.on_message(initial_msg)
 
-        assert 5000 in cog_feature._sessions
-        session = cog_feature._sessions[5000]
-        assert session.state == "discussing"
+            assert 5000 in cog_feature._sessions
+            session = cog_feature._sessions[5000]
+            assert session.state == "discussing"
 
         # Step 2: User answers in thread
         thread_msg1 = _make_thread_message(5000, 111, "Track message count and XP")
@@ -1104,9 +1097,12 @@ class TestThreadConversation:
             text="Plan: Create a leaderboard plugin tracking messages and XP.\n---PLAN_READY---"
         )]
 
-        with patch.object(
-            cog.client.messages, "create",
-            new_callable=AsyncMock, return_value=planning_resp2,
+        with (
+            patch.object(cog_feature, "_sessions", sessions_dict),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_resp2,
+            ),
         ):
             await cog.on_message(thread_msg1)
 
@@ -1116,6 +1112,7 @@ class TestThreadConversation:
         confirm_msg = _make_thread_message(5000, 111, "go")
 
         with (
+            patch.object(cog_feature, "_sessions", sessions_dict),
             patch.object(
                 cog, "_handle_request",
                 new_callable=AsyncMock,
@@ -1125,11 +1122,11 @@ class TestThreadConversation:
         ):
             await cog.on_message(confirm_msg)
 
-        # PR link should be posted
-        send_calls = [str(c) for c in confirm_msg.channel.send.call_args_list]
-        assert any("pull/99" in c for c in send_calls)
-        # Session should be cleaned up
-        assert 5000 not in cog_feature._sessions
+            # PR link should be posted
+            send_calls = [str(c) for c in confirm_msg.channel.send.call_args_list]
+            assert any("pull/99" in c for c in send_calls)
+            # Session should be cleaned up
+            assert 5000 not in cog_feature._sessions
 
     @pytest.mark.asyncio
     async def test_initial_plan_ready_on_first_call(self) -> None:
@@ -1158,6 +1155,8 @@ class TestThreadConversation:
         )]
 
         with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_resp,
@@ -1166,11 +1165,11 @@ class TestThreadConversation:
         ):
             await cog.on_message(initial_msg)
 
-        assert 6000 in cog_feature._sessions
-        session = cog_feature._sessions[6000]
-        assert session.state == "plan_ready"
+            assert 6000 in cog_feature._sessions
+            session = cog_feature._sessions[6000]
+            assert session.state == "plan_ready"
 
-        # Thread message should contain the go prompt
-        send_text = mock_thread.send.call_args[0][0]
-        assert "go" in send_text.lower()
-        assert "---PLAN_READY---" not in send_text
+            # Thread message should contain the go prompt
+            send_text = mock_thread.send.call_args[0][0]
+            assert "go" in send_text.lower()
+            assert "---PLAN_READY---" not in send_text
