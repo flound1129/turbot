@@ -207,6 +207,21 @@ class TestFeatureRequestCog:
         """Feature request creates a thread and starts planning conversation."""
         cog_feature._sessions.clear()
         cog_feature._last_request.clear()
+
+        # Diagnostic: check for dual-import issue
+        import sys
+        cf_test = cog_feature
+        cf_sys = sys.modules.get("cog_feature")
+        assert cf_test is cf_sys, (
+            f"DUAL IMPORT: test cog_feature id={id(cf_test)}, "
+            f"sys.modules id={id(cf_sys)}, "
+            f"test _last_request id={id(cf_test._last_request)}, "
+            f"sys _last_request id={id(cf_sys._last_request) if cf_sys else 'N/A'}"
+        )
+        assert not cog_feature._last_request, (
+            f"DIAG: _last_request not empty after clear: {cog_feature._last_request!r}"
+        )
+
         message, bot_user = self._make_message(
             "<@99999> feature request: add a ping command",
             has_role=True,
@@ -215,6 +230,10 @@ class TestFeatureRequestCog:
         mock_bot = MagicMock()
         mock_bot.user = bot_user
         cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        assert not cog_feature._last_request, (
+            f"DIAG2: _last_request not empty after cog init: {cog_feature._last_request!r}"
+        )
 
         planning_response = MagicMock()
         planning_response.content = [MagicMock(
@@ -228,6 +247,9 @@ class TestFeatureRequestCog:
             ),
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
         ):
+            assert not cog_feature._last_request, (
+                f"DIAG3: _last_request not empty inside with: {cog_feature._last_request!r}"
+            )
             await cog.on_message(message)
 
         # Diagnostic: if on_message exited early with a reply, show what it said
