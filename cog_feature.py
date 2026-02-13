@@ -204,7 +204,6 @@ class FeatureRequestCog(commands.Cog):
                 f"Please wait {remaining} seconds before submitting another request."
             )
             return
-        _last_request[message.author.id] = now
 
         label = "Feature request" if request_type == "plugin" else "Bot improvement"
 
@@ -214,6 +213,9 @@ class FeatureRequestCog(commands.Cog):
                 "feature requests right now. Please try again in a few minutes."
             )
             return
+
+        # Set cooldown after validation passes — don't burn it on circuit-open rejections
+        _last_request[message.author.id] = now
 
         await message.reply("On it! Generating code changes... this may take a moment.")
 
