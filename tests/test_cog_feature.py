@@ -20,8 +20,8 @@ def _make_author(
     has_role: bool = False,
     role_name: str = "BotAdmin",
 ) -> MagicMock:
-    """Create a mock author that passes isinstance(author, discord.Member)."""
-    author = MagicMock(spec=discord.Member)
+    """Create a mock author with standard Discord member attributes."""
+    author = MagicMock()
     author.bot = is_bot
     author.id = user_id
     if has_role:
