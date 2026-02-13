@@ -222,15 +222,6 @@ class TestFeatureRequestCog:
             text="Interesting! A few questions:\n1. What should !ping respond with?"
         )]
 
-        # Diagnostic: check if on_message uses a different _last_request
-        fn_globals_lr = cog.on_message.__func__.__globals__["_last_request"]
-        mod_lr = cog_feature._last_request
-        assert fn_globals_lr is mod_lr, (
-            f"GLOBALS MISMATCH: on_message globals _last_request id={id(fn_globals_lr)} "
-            f"contents={fn_globals_lr!r}, module _last_request id={id(mod_lr)} "
-            f"contents={mod_lr!r}"
-        )
-
         with (
             patch.object(
                 cog.client.messages, "create",
@@ -239,6 +230,15 @@ class TestFeatureRequestCog:
             patch.object(cog_feature, "_log", new_callable=AsyncMock),
         ):
             await cog.on_message(message)
+
+        # Diagnostic: show what happened
+        assert not message.reply.called, (
+            f"on_message sent unexpected reply: {message.reply.call_args_list}, "
+            f"_last_request={cog_feature._last_request!r}, "
+            f"author.id={message.author.id!r} (type={type(message.author.id).__name__}), "
+            f"_sessions={cog_feature._sessions!r}, "
+            f"channel.id={message.channel.id!r} (type={type(message.channel.id).__name__})"
+        )
 
         # Thread should have been created
         message.create_thread.assert_called_once()
