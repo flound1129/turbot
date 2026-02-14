@@ -82,6 +82,8 @@ Feature requests use a multi-turn thread conversation instead of one-shot code g
 - If code generation fails (transient/git errors), the session reverts to `plan_ready` so the user can retry with "go"
 - Policy violations (ValueError) still remove the session since retrying won't help
 
+**Step tracking:** During code generation (`_handle_request`), each sub-step is logged to `session.steps` as an audit trail. Steps: `code_generation`, `policy_scan` (plugins only), `create_branch`, `apply_changes`, `commit_and_push`, `open_pr`. Each entry records name, status (`started`/`completed`/`failed`), timestamps, optional error/detail. `session.branch_name` and `session.pr_url` capture artifacts. All persisted to SQLite via the `steps`, `branch_name`, and `pr_url` columns.
+
 ## Code Style
 
 - Python 3.12+ with modern type hints (PEP 604 `X | Y` unions, no `Optional`)

@@ -46,6 +46,16 @@ def init_db() -> None:
             )
             """
         )
+        # Migrate: add step tracking columns (idempotent)
+        for col, col_type in [
+            ("branch_name", "TEXT"),
+            ("pr_url", "TEXT"),
+            ("steps", "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
 
 def save_session(session: ThreadSession) -> None:
@@ -55,8 +65,9 @@ def save_session(session: ThreadSession) -> None:
             """
             INSERT OR REPLACE INTO sessions
                 (thread_id, user_id, request_type, original_description,
-                 messages, state, refined_description, created_at, last_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 messages, state, refined_description, created_at, last_active,
+                 branch_name, pr_url, steps)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session.thread_id,
@@ -68,6 +79,9 @@ def save_session(session: ThreadSession) -> None:
                 session.refined_description,
                 session.created_at,
                 session.last_active,
+                session.branch_name,
+                session.pr_url,
+                json.dumps(session.steps, ensure_ascii=False),
             ),
         )
 
@@ -90,6 +104,9 @@ def load_active_sessions() -> list[dict]:
             "refined_description": row["refined_description"],
             "created_at": row["created_at"],
             "last_active": row["last_active"],
+            "branch_name": row["branch_name"],
+            "pr_url": row["pr_url"],
+            "steps": json.loads(row["steps"]) if row["steps"] else [],
         }
         for row in rows
     ]

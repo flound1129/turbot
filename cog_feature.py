@@ -41,6 +41,14 @@ CANCEL_PATTERNS: set[str] = {
 
 PLAN_READY_MARKER: str = "---PLAN_READY---"
 
+# Step name constants for _handle_request instrumentation
+STEP_CODE_GEN: str = "code_generation"
+STEP_POLICY_SCAN: str = "policy_scan"
+STEP_CREATE_BRANCH: str = "create_branch"
+STEP_APPLY_CHANGES: str = "apply_changes"
+STEP_COMMIT_PUSH: str = "commit_and_push"
+STEP_OPEN_PR: str = "open_pr"
+
 
 @dataclass
 class ThreadSession:
@@ -53,9 +61,48 @@ class ThreadSession:
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     refined_description: str | None = None
+    branch_name: str | None = None
+    pr_url: str | None = None
+    steps: list[dict[str, object]] = field(default_factory=list)
 
 
 _sessions: dict[int, ThreadSession] = {}
+
+
+def _record_step(
+    session: ThreadSession,
+    name: str,
+    status: str,
+    *,
+    error: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Append or update a step entry in the session's step log.
+
+    If a step with matching *name* exists in ``"started"`` status, update it
+    to the given *status* (``"completed"`` or ``"failed"``).  Otherwise append
+    a new entry.
+    """
+    now = time.time()
+
+    # Try to find an existing "started" entry for this step name
+    for entry in session.steps:
+        if entry["name"] == name and entry["status"] == "started":
+            entry["status"] = status
+            entry["completed_at"] = now
+            entry["error"] = error
+            entry["detail"] = detail
+            return
+
+    # No existing started entry — append new
+    session.steps.append({
+        "name": name,
+        "status": status,
+        "started_at": now,
+        "completed_at": now if status != "started" else None,
+        "error": error,
+        "detail": detail,
+    })
 
 
 def _load_security_policy() -> str:
@@ -238,6 +285,9 @@ class FeatureRequestCog(commands.Cog):
                 refined_description=row["refined_description"],
                 created_at=row["created_at"],
                 last_active=row["last_active"],
+                branch_name=row["branch_name"],
+                pr_url=row["pr_url"],
+                steps=row["steps"],
             )
             _sessions[session.thread_id] = session
         cooldowns = session_store.load_cooldowns()
@@ -299,6 +349,7 @@ class FeatureRequestCog(commands.Cog):
                     async with message.channel.typing():
                         pr_url = await self._handle_request(
                             description, session.request_type,
+                            session=session,
                         )
                     session.state = "done"
                     _sessions.pop(session.thread_id, None)
@@ -537,7 +588,12 @@ class FeatureRequestCog(commands.Cog):
         feature_desc = _extract_description(text, request_type)
         await self.start_from_intent(message, feature_desc, request_type)
 
-    async def _handle_request(self, description: str, request_type: str) -> str:
+    async def _handle_request(
+        self,
+        description: str,
+        request_type: str,
+        session: ThreadSession | None = None,
+    ) -> str:
         """Generate code changes and create a PR."""
         security_policy = _load_security_policy()
 
@@ -551,6 +607,9 @@ class FeatureRequestCog(commands.Cog):
         codebase_text = ""
         for path, content in sorted(codebase.items()):
             codebase_text += f"\n--- {path} ---\n{content}\n"
+
+        if session:
+            _record_step(session, STEP_CODE_GEN, "started")
 
         response = await self.client.messages.create(
             model=config.CLAUDE_MODEL,
@@ -573,22 +632,41 @@ class FeatureRequestCog(commands.Cog):
         try:
             result: dict[str, object] = json.loads(raw)
         except json.JSONDecodeError as exc:
+            if session:
+                _record_step(session, STEP_CODE_GEN, "failed", error=str(exc))
             raise ValueError(f"Claude returned invalid JSON: {exc}") from exc
 
         if not isinstance(result, dict) or "changes" not in result:
+            if session:
+                _record_step(session, STEP_CODE_GEN, "failed",
+                             error="unexpected response format")
             raise ValueError("Claude returned an unexpected response format.")
 
         changes: list[dict[str, str]] = result["changes"]
         if not isinstance(changes, list):
+            if session:
+                _record_step(session, STEP_CODE_GEN, "failed",
+                             error="unexpected response format")
             raise ValueError("Claude returned an unexpected response format.")
         summary: str = result.get("summary", description)
         title: str = result.get("title", f"Feature: {description[:50]}")
 
+        if session:
+            _record_step(session, STEP_CODE_GEN, "completed",
+                         detail=f"{len(changes)} file(s) changed")
+
         # AST scan gate — reject policy violations before creating PR
         if request_type == "plugin":
+            if session:
+                _record_step(session, STEP_POLICY_SCAN, "started")
             violations = policy.scan_changes(changes)
             if violations:
+                if session:
+                    _record_step(session, STEP_POLICY_SCAN, "failed",
+                                 error="policy violations detected")
                 raise ValueError(_format_violations(violations))
+            if session:
+                _record_step(session, STEP_POLICY_SCAN, "completed")
 
         # Detect core changes
         is_core_change = any(
@@ -607,12 +685,37 @@ class FeatureRequestCog(commands.Cog):
             )
 
         async with _git_lock:
+            if session:
+                _record_step(session, STEP_CREATE_BRANCH, "started")
             branch = await github_ops.create_branch(description[:40])
+            if session:
+                session.branch_name = branch
+                _record_step(session, STEP_CREATE_BRANCH, "completed",
+                             detail=branch)
             try:
+                if session:
+                    _record_step(session, STEP_APPLY_CHANGES, "started")
                 github_ops.apply_changes(changes)
+                if session:
+                    _record_step(session, STEP_APPLY_CHANGES, "completed",
+                                 detail=f"{len(changes)} file(s)")
+
+                if session:
+                    _record_step(session, STEP_COMMIT_PUSH, "started")
+                    session_store.save_session(session)
                 changed_paths = [change["path"] for change in changes]
                 await github_ops.commit_and_push(branch, summary, paths=changed_paths)
+                if session:
+                    _record_step(session, STEP_COMMIT_PUSH, "completed")
+
+                if session:
+                    _record_step(session, STEP_OPEN_PR, "started")
                 pr_url = await github_ops.open_pr(branch, title, pr_body)
+                if session:
+                    session.pr_url = pr_url
+                    _record_step(session, STEP_OPEN_PR, "completed",
+                                 detail=pr_url)
+                    session_store.save_session(session)
             finally:
                 # Always return to main, even on failure
                 try:

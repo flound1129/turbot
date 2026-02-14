@@ -1,5 +1,6 @@
 """Tests for the SQLite session persistence layer."""
 
+import sqlite3
 import time
 
 import pytest
@@ -27,6 +28,9 @@ def _make_session(**overrides) -> ThreadSession:
         "created_at": time.time(),
         "last_active": time.time(),
         "refined_description": None,
+        "branch_name": None,
+        "pr_url": None,
+        "steps": [],
     }
     defaults.update(overrides)
     return ThreadSession(**defaults)
@@ -34,7 +38,6 @@ def _make_session(**overrides) -> ThreadSession:
 
 class TestInitDb:
     def test_creates_tables(self, tmp_path) -> None:
-        import sqlite3
         db_path = str(tmp_path / "sessions.db")
         conn = sqlite3.connect(db_path)
         tables = conn.execute(
@@ -150,3 +153,96 @@ class TestCooldowns:
         cooldowns = session_store.load_cooldowns()
         assert 111 in cooldowns
         assert 222 not in cooldowns
+
+
+class TestStepTracking:
+    def test_round_trip_with_steps(self) -> None:
+        steps = [
+            {
+                "name": "code_generation",
+                "status": "completed",
+                "started_at": 1707900000.0,
+                "completed_at": 1707900005.0,
+                "error": None,
+                "detail": "2 file(s) changed",
+            },
+            {
+                "name": "create_branch",
+                "status": "completed",
+                "started_at": 1707900005.0,
+                "completed_at": 1707900006.0,
+                "error": None,
+                "detail": "feature/leaderboard",
+            },
+        ]
+        session = _make_session(
+            branch_name="feature/leaderboard",
+            pr_url="https://github.com/user/repo/pull/42",
+            steps=steps,
+        )
+        session_store.save_session(session)
+
+        rows = session_store.load_active_sessions()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["branch_name"] == "feature/leaderboard"
+        assert row["pr_url"] == "https://github.com/user/repo/pull/42"
+        assert len(row["steps"]) == 2
+        assert row["steps"][0]["name"] == "code_generation"
+        assert row["steps"][1]["detail"] == "feature/leaderboard"
+
+    def test_round_trip_with_null_steps(self) -> None:
+        """Session with no steps round-trips as empty list."""
+        session = _make_session()
+        session_store.save_session(session)
+
+        rows = session_store.load_active_sessions()
+        assert len(rows) == 1
+        assert rows[0]["branch_name"] is None
+        assert rows[0]["pr_url"] is None
+        assert rows[0]["steps"] == []
+
+    def test_migration_adds_columns(self, tmp_path) -> None:
+        """init_db adds new columns to an existing table without them."""
+        db_path = str(tmp_path / "legacy.db")
+        # Create legacy table without new columns
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                thread_id   INTEGER PRIMARY KEY,
+                user_id     INTEGER NOT NULL,
+                request_type TEXT NOT NULL,
+                original_description TEXT NOT NULL,
+                messages    TEXT NOT NULL,
+                state       TEXT NOT NULL,
+                refined_description TEXT,
+                created_at  REAL NOT NULL,
+                last_active REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE cooldowns (
+                user_id      INTEGER PRIMARY KEY,
+                last_request REAL NOT NULL
+            )
+            """
+        )
+        conn.close()
+
+        # Point session_store at the legacy DB and run init_db
+        import unittest.mock
+        with unittest.mock.patch.object(session_store, "DB_PATH", db_path):
+            session_store.init_db()
+
+        # Verify new columns exist
+        conn = sqlite3.connect(db_path)
+        cols = [
+            row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        ]
+        conn.close()
+        assert "branch_name" in cols
+        assert "pr_url" in cols
+        assert "steps" in cols

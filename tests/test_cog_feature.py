@@ -1082,6 +1082,7 @@ class TestThreadConversation:
             # _handle_request should have been called with the refined description
             mock_handle.assert_called_once_with(
                 "Create a points-based leaderboard plugin", "plugin",
+                session=session,
             )
 
         # PR link should be posted in thread
@@ -1119,6 +1120,7 @@ class TestThreadConversation:
 
             mock_handle.assert_called_once_with(
                 "add a leaderboard", "plugin",
+                session=session,
             )
 
     @pytest.mark.asyncio
@@ -1629,6 +1631,9 @@ class TestSessionPersistence:
     def test_sessions_restored_on_init(self) -> None:
         """Active sessions are loaded from DB into _sessions on cog init."""
         now = time.time()
+        stored_steps = [{"name": "code_generation", "status": "started",
+                         "started_at": now - 5, "completed_at": None,
+                         "error": None, "detail": None}]
         stored = [{
             "thread_id": 7000,
             "user_id": 333,
@@ -1639,6 +1644,9 @@ class TestSessionPersistence:
             "refined_description": "plan text",
             "created_at": now - 100,
             "last_active": now - 10,
+            "branch_name": "feature/something",
+            "pr_url": None,
+            "steps": stored_steps,
         }]
         sessions_dict: dict = {}
         last_req_dict: dict = {}
@@ -1656,4 +1664,271 @@ class TestSessionPersistence:
             assert session.state == "plan_ready"
             assert session.user_id == 333
             assert session.messages == [{"role": "user", "content": "hi"}]
+            assert session.branch_name == "feature/something"
+            assert session.pr_url is None
+            assert len(session.steps) == 1
+            assert session.steps[0]["name"] == "code_generation"
             assert last_req_dict[333] == pytest.approx(now - 50)
+
+
+class TestRecordStep:
+    """Tests for the _record_step() helper function."""
+
+    def test_record_new_step(self) -> None:
+        """Appends a new step entry to an empty list."""
+        session = cog_feature.ThreadSession(
+            thread_id=1, user_id=2, request_type="plugin",
+            original_description="test",
+        )
+        cog_feature._record_step(session, cog_feature.STEP_CODE_GEN, "started")
+
+        assert len(session.steps) == 1
+        step = session.steps[0]
+        assert step["name"] == "code_generation"
+        assert step["status"] == "started"
+        assert step["completed_at"] is None
+        assert step["error"] is None
+        assert step["detail"] is None
+
+    def test_update_started_step(self) -> None:
+        """Finds a 'started' entry and updates to 'completed'."""
+        session = cog_feature.ThreadSession(
+            thread_id=1, user_id=2, request_type="plugin",
+            original_description="test",
+        )
+        cog_feature._record_step(session, cog_feature.STEP_CODE_GEN, "started")
+        cog_feature._record_step(session, cog_feature.STEP_CODE_GEN, "completed",
+                                 detail="2 file(s) changed")
+
+        assert len(session.steps) == 1
+        step = session.steps[0]
+        assert step["status"] == "completed"
+        assert step["completed_at"] is not None
+        assert step["detail"] == "2 file(s) changed"
+
+    def test_record_failed_step_with_error(self) -> None:
+        """Captures error message on failure."""
+        session = cog_feature.ThreadSession(
+            thread_id=1, user_id=2, request_type="plugin",
+            original_description="test",
+        )
+        cog_feature._record_step(session, cog_feature.STEP_COMMIT_PUSH, "started")
+        cog_feature._record_step(session, cog_feature.STEP_COMMIT_PUSH, "failed",
+                                 error="push rejected")
+
+        assert len(session.steps) == 1
+        step = session.steps[0]
+        assert step["status"] == "failed"
+        assert step["error"] == "push rejected"
+
+    def test_multiple_steps(self) -> None:
+        """Multiple different steps are appended independently."""
+        session = cog_feature.ThreadSession(
+            thread_id=1, user_id=2, request_type="plugin",
+            original_description="test",
+        )
+        cog_feature._record_step(session, cog_feature.STEP_CODE_GEN, "started")
+        cog_feature._record_step(session, cog_feature.STEP_CODE_GEN, "completed")
+        cog_feature._record_step(session, cog_feature.STEP_CREATE_BRANCH, "started")
+        cog_feature._record_step(session, cog_feature.STEP_CREATE_BRANCH, "completed",
+                                 detail="feature/test")
+
+        assert len(session.steps) == 2
+        assert session.steps[0]["name"] == "code_generation"
+        assert session.steps[1]["name"] == "create_branch"
+        assert session.steps[1]["detail"] == "feature/test"
+
+
+class TestHandleRequestSteps:
+    """Tests for step tracking in _handle_request."""
+
+    def setup_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    def teardown_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    @pytest.mark.asyncio
+    async def test_handle_request_records_steps(self) -> None:
+        """All steps are recorded on a successful plugin request."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+        )
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "plugins/leaderboard.py",
+                "action": "create",
+                "content": "import json\n",
+            }],
+            "summary": "Added leaderboard",
+            "title": "Add leaderboard",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create",
+                         new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch("github_ops.create_branch", new_callable=AsyncMock,
+                  return_value="feature/leaderboard"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock),
+            patch("github_ops.open_pr", new_callable=AsyncMock,
+                  return_value="https://github.com/pr/42"),
+            patch("github_ops._run", new_callable=AsyncMock),
+        ):
+            pr_url = await cog._handle_request(
+                "add a leaderboard", "plugin", session=session,
+            )
+
+        assert pr_url == "https://github.com/pr/42"
+        assert session.branch_name == "feature/leaderboard"
+        assert session.pr_url == "https://github.com/pr/42"
+
+        step_names = [s["name"] for s in session.steps]
+        assert step_names == [
+            "code_generation",
+            "policy_scan",
+            "create_branch",
+            "apply_changes",
+            "commit_and_push",
+            "open_pr",
+        ]
+        # All steps should be completed
+        for step in session.steps:
+            assert step["status"] == "completed", f"{step['name']} not completed"
+
+    @pytest.mark.asyncio
+    async def test_handle_request_without_session(self) -> None:
+        """session=None works (backward compat, no steps recorded)."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "plugins/test.py",
+                "action": "create",
+                "content": "import json\n",
+            }],
+            "summary": "Test",
+            "title": "Test",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create",
+                         new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch("github_ops.create_branch", new_callable=AsyncMock,
+                  return_value="feature/test"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock),
+            patch("github_ops.open_pr", new_callable=AsyncMock,
+                  return_value="https://github.com/pr/1"),
+            patch("github_ops._run", new_callable=AsyncMock),
+        ):
+            pr_url = await cog._handle_request("test feature", "plugin")
+
+        assert pr_url == "https://github.com/pr/1"
+
+    @pytest.mark.asyncio
+    async def test_step_failure_recorded_on_git_error(self) -> None:
+        """Simulate push failure — last step shows 'started' (not completed)."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+        )
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "plugins/test.py",
+                "action": "create",
+                "content": "import json\n",
+            }],
+            "summary": "Test",
+            "title": "Test",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create",
+                         new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch("github_ops.create_branch", new_callable=AsyncMock,
+                  return_value="feature/test"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock,
+                  side_effect=RuntimeError("push failed")),
+            patch("github_ops._run", new_callable=AsyncMock),
+        ):
+            with pytest.raises(RuntimeError, match="push failed"):
+                await cog._handle_request(
+                    "test feature", "plugin", session=session,
+                )
+
+        # Earlier steps should be completed
+        completed = [s for s in session.steps if s["status"] == "completed"]
+        assert any(s["name"] == "code_generation" for s in completed)
+        assert any(s["name"] == "create_branch" for s in completed)
+        assert any(s["name"] == "apply_changes" for s in completed)
+        # commit_and_push should be in "started" state (never completed)
+        push_step = [s for s in session.steps if s["name"] == "commit_and_push"]
+        assert len(push_step) == 1
+        assert push_step[0]["status"] == "started"
+
+    @pytest.mark.asyncio
+    async def test_core_request_skips_policy_scan_step(self) -> None:
+        """Core requests don't record a policy_scan step."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="core",
+            original_description="fix a bug",
+        )
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "bot.py",
+                "action": "modify",
+                "content": "# fixed",
+            }],
+            "summary": "Fixed bug",
+            "title": "Fix bug",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create",
+                         new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_project_files",
+                         return_value={"bot.py": "# bot"}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch("github_ops.create_branch", new_callable=AsyncMock,
+                  return_value="feature/fix"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock),
+            patch("github_ops.open_pr", new_callable=AsyncMock,
+                  return_value="https://github.com/pr/1"),
+            patch("github_ops._run", new_callable=AsyncMock),
+        ):
+            await cog._handle_request("fix a bug", "core", session=session)
+
+        step_names = [s["name"] for s in session.steps]
+        assert "policy_scan" not in step_names
