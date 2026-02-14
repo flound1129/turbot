@@ -11,6 +11,7 @@ import pytest
 
 from api_health import ClaudeHealth
 import cog_feature
+import command_registry
 import session_store
 
 
@@ -24,6 +25,14 @@ def _mock_session_store(monkeypatch):
     monkeypatch.setattr(session_store, "load_active_sessions", lambda: [])
     monkeypatch.setattr(session_store, "load_cooldowns", lambda: {})
     monkeypatch.setattr(session_store, "delete_expired_cooldowns", lambda c: None)
+
+
+@pytest.fixture(autouse=True)
+def _mock_command_registry(monkeypatch):
+    """Prevent all tests from touching the real command registry database."""
+    monkeypatch.setattr(command_registry, "get_taken_names",
+                        lambda: {"slash": [], "prefix": []})
+    monkeypatch.setattr(command_registry, "check_collisions", lambda cmds: [])
 
 
 def _make_author(
@@ -1798,6 +1807,7 @@ class TestHandleRequestSteps:
         assert step_names == [
             "code_generation",
             "policy_scan",
+            "collision_check",
             "create_branch",
             "apply_changes",
             "commit_and_push",
@@ -1932,3 +1942,136 @@ class TestHandleRequestSteps:
 
         step_names = [s["name"] for s in session.steps]
         assert "policy_scan" not in step_names
+
+
+class TestCommandCollisionCheck:
+    """Tests for command name collision detection in _handle_request."""
+
+    @pytest.mark.asyncio
+    async def test_collision_raises_value_error(self) -> None:
+        """Generated plugin with colliding command name raises ValueError."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "plugins/roll.py",
+                "action": "create",
+                "content": (
+                    "from discord import app_commands\n"
+                    "class R:\n"
+                    "    @app_commands.command(name=\"roll\")\n"
+                    "    async def roll(self, interaction): pass\n"
+                ),
+            }],
+            "summary": "Added roll plugin",
+            "title": "Add roll",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create",
+                         new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(
+                command_registry, "get_taken_names",
+                return_value={"slash": ["roll"], "prefix": []},
+            ),
+            patch.object(
+                command_registry, "check_collisions",
+                return_value=["slash command 'roll' already registered by plugins/dice.py"],
+            ),
+        ):
+            with pytest.raises(ValueError, match="collision"):
+                await cog._handle_request("add dice roller", "plugin")
+
+    @pytest.mark.asyncio
+    async def test_no_collision_proceeds(self) -> None:
+        """Unique command name passes collision check and creates PR."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "plugins/weather.py",
+                "action": "create",
+                "content": (
+                    "from discord import app_commands\n"
+                    "class W:\n"
+                    "    @app_commands.command(name=\"weather\")\n"
+                    "    async def weather(self, interaction): pass\n"
+                ),
+            }],
+            "summary": "Added weather plugin",
+            "title": "Add weather",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create",
+                         new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_plugin_context", return_value={}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch.object(
+                command_registry, "get_taken_names",
+                return_value={"slash": ["roll"], "prefix": ["ping"]},
+            ),
+            patch.object(
+                command_registry, "check_collisions",
+                return_value=[],
+            ),
+            patch("github_ops.create_branch", new_callable=AsyncMock,
+                  return_value="feature/weather"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock),
+            patch("github_ops.open_pr", new_callable=AsyncMock,
+                  return_value="https://github.com/pr/5"),
+            patch("github_ops._run", new_callable=AsyncMock),
+        ):
+            pr_url = await cog._handle_request("add weather command", "plugin")
+
+        assert pr_url == "https://github.com/pr/5"
+
+    @pytest.mark.asyncio
+    async def test_core_request_skips_collision_check(self) -> None:
+        """Core requests do not run collision check."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="core",
+            original_description="fix a bug",
+        )
+
+        claude_response = MagicMock()
+        claude_response.content = [MagicMock(text=json.dumps({
+            "changes": [{
+                "path": "bot.py",
+                "action": "modify",
+                "content": "# fixed",
+            }],
+            "summary": "Fixed bug",
+            "title": "Fix bug",
+        }))]
+
+        with (
+            patch.object(cog.client.messages, "create",
+                         new_callable=AsyncMock, return_value=claude_response),
+            patch.object(cog_feature, "_read_project_files",
+                         return_value={"bot.py": "# bot"}),
+            patch.object(cog_feature, "_load_security_policy", return_value="# policy"),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch("github_ops.create_branch", new_callable=AsyncMock,
+                  return_value="feature/fix"),
+            patch("github_ops.apply_changes"),
+            patch("github_ops.commit_and_push", new_callable=AsyncMock),
+            patch("github_ops.open_pr", new_callable=AsyncMock,
+                  return_value="https://github.com/pr/1"),
+            patch("github_ops._run", new_callable=AsyncMock),
+        ):
+            await cog._handle_request("fix a bug", "core", session=session)
+
+        step_names = [s["name"] for s in session.steps]
+        assert "collision_check" not in step_names

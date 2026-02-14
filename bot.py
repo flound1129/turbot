@@ -12,6 +12,7 @@ from aiohttp import web
 from discord.ext import commands
 
 from api_health import claude_health, is_transient
+import command_registry
 import config
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
@@ -89,6 +90,14 @@ async def _start_feature_request(
 @bot.event
 async def on_ready() -> None:
     print(f"Turbot is online as {bot.user} — feeling Turbotastic!")
+
+    # Sync slash command tree with Discord
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} slash command(s)")
+    except Exception as e:
+        print(f"Slash command sync failed: {e}")
+        await log_to_admin(f"**Slash command sync failed**: {e}")
 
     # Check if the supervisor left a status message for us
     if os.path.exists(STATUS_FILE):
@@ -299,6 +308,11 @@ async def main() -> None:
                     await bot.load_extension(ext_name)
                 except Exception as e:
                     print(f"Failed to load plugin {ext_name}: {e}")
+
+    # Populate command registry from plugin files
+    command_registry.init_commands_table()
+    found = command_registry.scan_plugins_directory(plugins_dir)
+    command_registry.rebuild_registry(found)
 
     try:
         await bot.start(config.DISCORD_TOKEN)

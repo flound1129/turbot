@@ -137,6 +137,12 @@ class TestWebhookHandler:
 class TestOnReady:
     """Tests for on_ready status file handling."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_tree_sync(self):
+        """Prevent tree.sync() from failing in tests (no application_id)."""
+        with patch.object(bot.bot.tree, "sync", new_callable=AsyncMock, return_value=[]):
+            yield
+
     @pytest.mark.asyncio
     async def test_deploy_success_status(self, tmp_path: str) -> None:
         """on_ready logs deploy success when .status has deploy_success event."""

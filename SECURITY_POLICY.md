@@ -49,7 +49,7 @@ logging, copy, random, uuid, html, urllib.parse
 ### Discord (via TurbotPlugin)
 
 ```
-discord, discord.ext.commands
+discord, discord.ext.commands, discord.app_commands
 ```
 
 ---
@@ -78,11 +78,52 @@ async def setup(bot: commands.Bot) -> None:
 
 - Extend `TurbotPlugin`, NOT `commands.Cog` directly
 - Use `self.turbot` (a `PluginContext`) for bot API — NOT `self.bot`
-- Use `ctx` for command replies
+- Use `ctx` for prefix command replies, `interaction` for slash command replies
 - Module-level `async def setup(bot)` is required for discord.py extension loading
 - Plugin files live in `plugins/` only
 - Use `self.turbot.store_get(key)` / `self.turbot.store_set(key, value)` for persistence
 - NEVER use raw file I/O (`open()`, `pathlib`, etc.) — the store API handles it safely
+
+---
+
+## Slash Command Plugin Template
+
+Slash commands are preferred for new user-facing features. They provide auto-complete, built-in help, and a better UX.
+
+```python
+from discord import app_commands
+from discord.ext import commands
+from plugin_api import TurbotPlugin
+import discord
+
+class MyPlugin(TurbotPlugin):
+    """Short description of what this plugin does."""
+
+    @app_commands.command(name="mycommand", description="What the command does")
+    async def my_command(self, interaction: discord.Interaction) -> None:
+        """Slash command handler."""
+        await interaction.response.send_message("Response here")
+
+    @app_commands.command(name="slow_command", description="A command that takes time")
+    async def slow_command(self, interaction: discord.Interaction) -> None:
+        """Example of a deferred response for long operations."""
+        await interaction.response.defer()
+        # ... do slow work ...
+        await interaction.followup.send("Done!")
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(MyPlugin(bot))
+```
+
+### Slash Command Rules
+
+- Use `@app_commands.command(name="...", description="...")` decorator
+- Handler receives `interaction: discord.Interaction` (NOT `ctx`)
+- Reply with `await interaction.response.send_message(...)`
+- For operations over 3 seconds, defer first: `await interaction.response.defer()`
+- Then reply with `await interaction.followup.send(...)`
+- You may also use `@app_commands.describe(param="description")` for parameter docs
+- The `app_command` and `describe` aliases are available from `plugin_api`
 
 ---
 

@@ -13,6 +13,7 @@ from typing import Any
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
@@ -124,3 +125,7 @@ class TurbotPlugin(commands.Cog):
 # Re-export conveniences so plugins don't need extra imports
 command = commands.command
 listener = commands.Cog.listener
+
+# Slash command re-exports
+app_command = app_commands.command
+describe = app_commands.describe

@@ -33,9 +33,10 @@ The name is a fish pun (turbot = flatfish + bot). The adjective is **Turbotastic
 supervisor.py       — Entry point. Bot lifecycle, deploy, rollback
 bot.py              — Discord bot + GitHub webhook server (aiohttp)
 cog_feature.py      — Feature request cog (dual-path: plugin vs core)
+command_registry.py — AST command scanner + SQLite registry for collision prevention
 github_ops.py       — Git/GitHub helpers (branch, commit, push, PR via gh CLI)
 config.py           — Loads .env configuration
-plugin_api.py       — PluginContext + TurbotPlugin base class for plugins
+plugin_api.py       — PluginContext + TurbotPlugin base class + slash command re-exports
 policy.py           — AST-based security scanner for plugin code
 api_health.py       — Circuit breaker for Claude API availability
 session_store.py    — SQLite persistence for feature request sessions + cooldowns
@@ -44,14 +45,14 @@ plugins/            — Plugin directory (auto-loaded on startup)
   __init__.py       — Package marker
   example_ping.py   — Reference plugin demonstrating correct pattern
 data/               — Plugin + session storage (created automatically)
-  sessions.db       — SQLite DB for session persistence (auto-created)
+  sessions.db       — SQLite DB for session + command registry persistence (auto-created)
 ```
 
 ## Key Behaviors
 
 - **Chat**: @mention the bot → Claude responds with per-channel conversation memory (last 20 messages)
 - **Intent detection**: During chat, the system prompt instructs Claude to append `[FEATURE]` or `[IMPROVEMENT]` markers when it detects the user wants a feature. The marker is stripped before display/history and routes to the feature request flow. No extra API call — piggybacks on the existing chat call.
-- **Feature requests**: Detected naturally via chat intent, or explicitly with "feature request: <description>" → role check → creates Discord thread → multi-turn planning conversation with Claude → user confirms → code gen → AST scan → opens PR
+- **Feature requests**: Detected naturally via chat intent, or explicitly with "feature request: <description>" → role check → creates Discord thread → multi-turn planning conversation with Claude → user confirms → code gen → AST scan → collision check → opens PR
 - **Bot improvements**: Detected naturally via chat intent, or explicitly with "bot improvement: <description>" → role check → creates Discord thread → planning conversation → user confirms → code gen → PR flagged as CORE CHANGE
 - **Deploy**: GitHub webhook on PR merge → bot writes `.deploy` + exits → supervisor pulls + restarts
 - **Rollback**: If bot crashes within 30s of deploy, supervisor reverts to last known good commit
@@ -82,7 +83,22 @@ Feature requests use a multi-turn thread conversation instead of one-shot code g
 - If code generation fails (transient/git errors), the session reverts to `plan_ready` so the user can retry with "go"
 - Policy violations (ValueError) still remove the session since retrying won't help
 
-**Step tracking:** During code generation (`_handle_request`), each sub-step is logged to `session.steps` as an audit trail. Steps: `code_generation`, `policy_scan` (plugins only), `create_branch`, `apply_changes`, `commit_and_push`, `open_pr`. Each entry records name, status (`started`/`completed`/`failed`), timestamps, optional error/detail. `session.branch_name` and `session.pr_url` capture artifacts. All persisted to SQLite via the `steps`, `branch_name`, and `pr_url` columns.
+**Step tracking:** During code generation (`_handle_request`), each sub-step is logged to `session.steps` as an audit trail. Steps: `code_generation`, `policy_scan` (plugins only), `collision_check` (plugins only), `create_branch`, `apply_changes`, `commit_and_push`, `open_pr`. Each entry records name, status (`started`/`completed`/`failed`), timestamps, optional error/detail. `session.branch_name` and `session.pr_url` capture artifacts. All persisted to SQLite via the `steps`, `branch_name`, and `pr_url` columns.
+
+## Command Registry
+
+**Command registry** (`command_registry.py`): AST-scans plugin files on startup to find all registered prefix commands (`@commands.command`) and slash commands (`@app_commands.command`), stores them in the `commands` table of `data/sessions.db`, and provides collision detection during code generation.
+
+**How it works:**
+- On startup, `bot.py` calls `scan_plugins_directory()` → `rebuild_registry()` to populate the table
+- During plugin code generation, `cog_feature.py` injects taken command names into the system prompt and runs a post-generation collision check
+- Collisions are non-retryable errors (same treatment as policy violations)
+
+**Slash command support:**
+- `plugin_api.py` re-exports `app_commands.command` as `app_command` and `app_commands.describe` as `describe`
+- `SECURITY_POLICY.md` includes a slash command plugin template
+- `bot.py` calls `bot.tree.sync()` in `on_ready` to register slash commands with Discord
+- Slash commands are preferred for new user-facing plugin features
 
 ## Code Style
 
@@ -144,6 +160,7 @@ Feature requests use a multi-turn thread conversation instead of one-shot code g
 
 ## Security
 
+- **Command registry** (`command_registry.py`) prevents generated plugins from claiming already-taken command names
 - **AST policy scanner** (`policy.py`) rejects plugin code that uses forbidden imports, builtins, or dunder access before any PR is created
 - **Security policy** (`SECURITY_POLICY.md`) is injected into every Claude code-generation prompt — defines allowed/forbidden lists
 - **Path traversal prevention** in `github_ops.apply_changes()` — rejects paths that escape the project directory

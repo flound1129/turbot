@@ -13,6 +13,7 @@ import discord
 from discord.ext import commands
 
 from api_health import claude_health, is_transient
+import command_registry
 import config
 import github_ops
 import policy
@@ -44,6 +45,7 @@ PLAN_READY_MARKER: str = "---PLAN_READY---"
 # Step name constants for _handle_request instrumentation
 STEP_CODE_GEN: str = "code_generation"
 STEP_POLICY_SCAN: str = "policy_scan"
+STEP_COLLISION_CHECK: str = "collision_check"
 STEP_CREATE_BRANCH: str = "create_branch"
 STEP_APPLY_CHANGES: str = "apply_changes"
 STEP_COMMIT_PUSH: str = "commit_and_push"
@@ -146,6 +148,17 @@ PLUGIN RULES (STRICTLY ENFORCED):
 - NEVER call: exec(), eval(), compile(), open(), __import__(), breakpoint().
 - NEVER access: __subclasses__, __globals__, __builtins__, __code__, __class__.
 - Each plugin file MUST have an async def setup(bot) function at module level.
+
+SLASH COMMANDS (preferred for new user-facing features):
+- Use @app_commands.command(name="cmd", description="...") for slash commands.
+- Slash command methods receive an `interaction: discord.Interaction` parameter (NOT ctx).
+- Reply with `await interaction.response.send_message(...)`.
+- For long operations, defer first: `await interaction.response.defer()` then `await interaction.followup.send(...)`.
+- Import: `from discord import app_commands` or use the `app_command` alias from plugin_api.
+- You can also use prefix commands with @commands.command(name="cmd") where appropriate.
+- Do NOT reuse any command name already listed in the taken names below.
+
+{taken_names}
 
 {security_policy}
 """
@@ -599,7 +612,26 @@ class FeatureRequestCog(commands.Cog):
 
         if request_type == "plugin":
             codebase = _read_plugin_context()
-            system_prompt = PLUGIN_SYSTEM_PROMPT.format(security_policy=security_policy)
+            taken = command_registry.get_taken_names()
+            taken_lines: list[str] = []
+            if taken.get("prefix"):
+                taken_lines.append(
+                    f"- Prefix commands: {', '.join(sorted(taken['prefix']))}"
+                )
+            if taken.get("slash"):
+                taken_lines.append(
+                    f"- Slash commands: {', '.join(sorted(taken['slash']))}"
+                )
+            taken_text = (
+                "ALREADY TAKEN COMMAND NAMES (do NOT reuse these):\n"
+                + "\n".join(taken_lines)
+                if taken_lines
+                else "No existing commands registered."
+            )
+            system_prompt = PLUGIN_SYSTEM_PROMPT.format(
+                security_policy=security_policy,
+                taken_names=taken_text,
+            )
         else:
             codebase = _read_project_files()
             system_prompt = CORE_SYSTEM_PROMPT.format(security_policy=security_policy)
@@ -667,6 +699,30 @@ class FeatureRequestCog(commands.Cog):
                 raise ValueError(_format_violations(violations))
             if session:
                 _record_step(session, STEP_POLICY_SCAN, "completed")
+
+            # Command name collision check
+            if session:
+                _record_step(session, STEP_COLLISION_CHECK, "started")
+            new_cmds: list[command_registry.CommandInfo] = []
+            for change in changes:
+                path = change.get("path", "")
+                if path.endswith(".py") and change.get("action") != "delete":
+                    new_cmds.extend(
+                        command_registry.scan_file_for_commands(
+                            change.get("content", ""), path,
+                        )
+                    )
+            collisions = command_registry.check_collisions(new_cmds)
+            if collisions:
+                detail = "; ".join(collisions)
+                if session:
+                    _record_step(session, STEP_COLLISION_CHECK, "failed",
+                                 error=detail)
+                raise ValueError(
+                    f"**Command name collision** — PR not created.\n{detail}"
+                )
+            if session:
+                _record_step(session, STEP_COLLISION_CHECK, "completed")
 
         # Detect core changes
         is_core_change = any(
