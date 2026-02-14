@@ -95,6 +95,7 @@ Feature requests use a multi-turn thread conversation instead of one-shot code g
 - `WEBHOOK_SECRET` — GitHub webhook HMAC secret
 - `WEBHOOK_PORT` — webhook listener port (default: 8080)
 - `LOG_CHANNEL_ID` — Discord channel ID for admin/log messages
+- `CLAUDE_MODEL` — Claude model for code generation (default: `claude-sonnet-4-5-20250929`)
 - `PLANNING_MODEL` — Claude model for planning conversations (default: same as `CLAUDE_MODEL`)
 
 ## CI/CD
