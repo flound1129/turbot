@@ -301,6 +301,9 @@ class FeatureRequestCog(commands.Cog):
                             "Something went wrong while creating the PR. "
                             "Please try again later."
                         )
+                    await _log(
+                        f"**{label} failed** in <#{message.channel.id}>: {e}"
+                    )
                 finally:
                     _sessions.pop(session.thread_id, None)
                 return
