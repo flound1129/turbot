@@ -199,12 +199,12 @@ async def on_message(message: discord.Message) -> None:
             if len(history) > MAX_HISTORY:
                 history[:] = history[-MAX_HISTORY:]
 
-            # Split long replies to respect Discord's 2000-char limit
-            for chunk in _split_reply(reply):
-                await message.reply(chunk)
-
             if intent is not None:
                 await _start_feature_request(message, text, intent)
+            else:
+                # Split long replies to respect Discord's 2000-char limit
+                for chunk in _split_reply(reply):
+                    await message.reply(chunk)
 
     except Exception as e:
         if is_transient(e):

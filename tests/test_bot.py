@@ -569,8 +569,8 @@ class TestIntentDetectionInChat:
         return message
 
     @pytest.mark.asyncio
-    async def test_marker_stripped_from_reply(self) -> None:
-        """[FEATURE] marker is stripped before sending reply to user."""
+    async def test_no_channel_reply_when_intent_detected(self) -> None:
+        """When [FEATURE] is detected, no reply is sent to the channel."""
         mock_response = MagicMock()
         mock_response.content = [MagicMock(
             text="Sure, I can help with that! [FEATURE]"
@@ -590,9 +590,7 @@ class TestIntentDetectionInChat:
             bot.channel_history.clear()
             await bot.on_message(message)
 
-        reply_text = message.reply.call_args[0][0]
-        assert "[FEATURE]" not in reply_text
-        assert "Sure, I can help with that!" in reply_text
+        message.reply.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_marker_stripped_from_history(self) -> None:
