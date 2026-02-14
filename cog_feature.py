@@ -16,6 +16,7 @@ from api_health import claude_health, is_transient
 import config
 import github_ops
 import policy
+import session_store
 
 if TYPE_CHECKING:
     from bot import log_to_admin as _log_to_admin
@@ -49,8 +50,8 @@ class ThreadSession:
     original_description: str
     messages: list[dict[str, str]] = field(default_factory=list)
     state: str = "discussing"  # "discussing", "plan_ready", "generating", "done"
-    created_at: float = field(default_factory=time.monotonic)
-    last_active: float = field(default_factory=time.monotonic)
+    created_at: float = field(default_factory=time.time)
+    last_active: float = field(default_factory=time.time)
     refined_description: str | None = None
 
 
@@ -199,7 +200,7 @@ def _format_violations(results: list[policy.ScanResult]) -> str:
 
 def _check_session_timeout(session: ThreadSession) -> bool:
     """Return True if the session has timed out."""
-    return (time.monotonic() - session.last_active) >= SESSION_TIMEOUT
+    return (time.time() - session.last_active) >= SESSION_TIMEOUT
 
 
 def _is_confirmation(text: str) -> bool:
@@ -221,6 +222,29 @@ class FeatureRequestCog(commands.Cog):
             api_key=config.ANTHROPIC_API_KEY,
             timeout=anthropic.Timeout(connect=5.0, read=90.0, write=5.0, pool=10.0),
         )
+        self._restore_sessions()
+
+    def _restore_sessions(self) -> None:
+        """Initialize DB and restore active sessions + cooldowns from SQLite."""
+        session_store.init_db()
+        for row in session_store.load_active_sessions():
+            session = ThreadSession(
+                thread_id=row["thread_id"],
+                user_id=row["user_id"],
+                request_type=row["request_type"],
+                original_description=row["original_description"],
+                messages=row["messages"],
+                state=row["state"],
+                refined_description=row["refined_description"],
+                created_at=row["created_at"],
+                last_active=row["last_active"],
+            )
+            _sessions[session.thread_id] = session
+        cooldowns = session_store.load_cooldowns()
+        _last_request.update(cooldowns)
+        # Clean up expired cooldowns
+        cutoff = time.time() - REQUEST_COOLDOWN
+        session_store.delete_expired_cooldowns(cutoff)
 
     async def _call_planning_claude(
         self, session: ThreadSession,
@@ -245,6 +269,7 @@ class FeatureRequestCog(commands.Cog):
                 "This request has timed out. Start a new one in the main channel."
             )
             _sessions.pop(session.thread_id, None)
+            session_store.delete_session(session.thread_id)
             return
 
         # Ignore if not the original requester
@@ -255,12 +280,13 @@ class FeatureRequestCog(commands.Cog):
         if session.state in ("generating", "done"):
             return
 
-        session.last_active = time.monotonic()
+        session.last_active = time.time()
         user_text = message.content.strip()
 
         if session.state == "plan_ready":
             if _is_confirmation(user_text):
                 session.state = "generating"
+                session_store.save_session(session)
                 description = session.refined_description or session.original_description
                 label = (
                     "Feature request" if session.request_type == "plugin"
@@ -275,16 +301,23 @@ class FeatureRequestCog(commands.Cog):
                             description, session.request_type,
                         )
                     session.state = "done"
+                    _sessions.pop(session.thread_id, None)
+                    session_store.delete_session(session.thread_id)
                     await message.channel.send(
                         f"Turbotastic! PR created: {pr_url}"
                     )
                     await _log(f"**PR created** for {label.lower()}: {pr_url}")
                 except ValueError as e:
+                    # Policy violation — retrying won't help
                     session.state = "done"
+                    _sessions.pop(session.thread_id, None)
+                    session_store.delete_session(session.thread_id)
                     await message.channel.send(str(e))
                     await _log(f"**{label} rejected** (policy violation): {e}")
                 except Exception as e:
-                    session.state = "done"
+                    # Transient or unknown failure — keep session for retry
+                    session.state = "plan_ready"
+                    session_store.save_session(session)
                     if is_transient(e):
                         tripped = claude_health.record_failure()
                         if tripped:
@@ -294,23 +327,22 @@ class FeatureRequestCog(commands.Cog):
                             )
                         await message.channel.send(
                             "The Claude API is currently unavailable. "
-                            "Please try again in a few minutes."
+                            "Reply **go** to try again, or keep chatting to refine."
                         )
                     else:
                         await message.channel.send(
                             "Something went wrong while creating the PR. "
-                            "Please try again later."
+                            "Reply **go** to try again, or keep chatting to refine."
                         )
                     await _log(
                         f"**{label} failed** in <#{message.channel.id}>: {e}"
                     )
-                finally:
-                    _sessions.pop(session.thread_id, None)
                 return
 
             if _is_cancellation(user_text):
                 session.state = "done"
                 _sessions.pop(session.thread_id, None)
+                session_store.delete_session(session.thread_id)
                 await message.channel.send("Request cancelled.")
                 return
 
@@ -361,6 +393,7 @@ class FeatureRequestCog(commands.Cog):
             display_text = reply_text
 
         session.messages.append({"role": "assistant", "content": reply_text})
+        session_store.save_session(session)
         await message.channel.send(display_text)
 
     async def start_from_intent(
@@ -391,7 +424,7 @@ class FeatureRequestCog(commands.Cog):
             return
 
         # Per-user cooldown
-        now = time.monotonic()
+        now = time.time()
         last = _last_request.get(message.author.id)
         if last is not None and now - last < REQUEST_COOLDOWN:
             remaining = int(REQUEST_COOLDOWN - (now - last))
@@ -411,6 +444,7 @@ class FeatureRequestCog(commands.Cog):
 
         # Set cooldown after validation passes — don't burn it on circuit-open rejections
         _last_request[message.author.id] = now
+        session_store.save_cooldown(message.author.id, now)
 
         await _log(
             f"**{label}** from {message.author} "
@@ -429,6 +463,7 @@ class FeatureRequestCog(commands.Cog):
             original_description=description,
         )
         _sessions[thread.id] = session
+        session_store.save_session(session)
 
         # First planning call
         session.messages.append({
@@ -457,6 +492,7 @@ class FeatureRequestCog(commands.Cog):
                     "Please try again later."
                 )
             _sessions.pop(thread.id, None)
+            session_store.delete_session(thread.id)
             return
 
         # Check for plan ready marker
@@ -473,6 +509,7 @@ class FeatureRequestCog(commands.Cog):
             display_text = reply_text
 
         session.messages.append({"role": "assistant", "content": reply_text})
+        session_store.save_session(session)
         await thread.send(display_text)
 
     @commands.Cog.listener()

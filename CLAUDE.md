@@ -38,11 +38,13 @@ config.py           — Loads .env configuration
 plugin_api.py       — PluginContext + TurbotPlugin base class for plugins
 policy.py           — AST-based security scanner for plugin code
 api_health.py       — Circuit breaker for Claude API availability
+session_store.py    — SQLite persistence for feature request sessions + cooldowns
 SECURITY_POLICY.md  — Machine-readable policy (injected into Claude prompts)
 plugins/            — Plugin directory (auto-loaded on startup)
   __init__.py       — Package marker
   example_ping.py   — Reference plugin demonstrating correct pattern
-data/               — Plugin storage (created automatically, per-plugin isolation)
+data/               — Plugin + session storage (created automatically)
+  sessions.db       — SQLite DB for session persistence (auto-created)
 ```
 
 ## Key Behaviors
@@ -75,7 +77,10 @@ Feature requests use a multi-turn thread conversation instead of one-shot code g
 - User can cancel anytime with "cancel", "nvm", "abort", etc.
 - Confirmation words: "go", "yes", "proceed", "lgtm", "ship it", etc.
 - In `plan_ready` state, unrecognized text returns to `discussing` for continued refinement
-- Thread sessions are stored in-memory (`_sessions` dict keyed by thread ID)
+- Thread sessions are persisted to SQLite (`data/sessions.db`) and restored on bot restart
+- In-memory `_sessions` dict is the primary lookup; SQLite is the durable backing store
+- If code generation fails (transient/git errors), the session reverts to `plan_ready` so the user can retry with "go"
+- Policy violations (ValueError) still remove the session since retrying won't help
 
 ## Code Style
 

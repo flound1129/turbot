@@ -11,6 +11,19 @@ import pytest
 
 from api_health import ClaudeHealth
 import cog_feature
+import session_store
+
+
+@pytest.fixture(autouse=True)
+def _mock_session_store(monkeypatch):
+    """Prevent all tests from touching the real SQLite database."""
+    monkeypatch.setattr(session_store, "init_db", lambda: None)
+    monkeypatch.setattr(session_store, "save_session", lambda s: None)
+    monkeypatch.setattr(session_store, "delete_session", lambda tid: None)
+    monkeypatch.setattr(session_store, "save_cooldown", lambda uid, ts: None)
+    monkeypatch.setattr(session_store, "load_active_sessions", lambda: [])
+    monkeypatch.setattr(session_store, "load_cooldowns", lambda: {})
+    monkeypatch.setattr(session_store, "delete_expired_cooldowns", lambda c: None)
 
 
 def _make_author(
@@ -450,7 +463,7 @@ class TestRateLimiting:
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
         # Simulate a recent request from this user
-        cog_feature._last_request[77777] = time.monotonic()
+        cog_feature._last_request[77777] = time.time()
 
         with patch.object(cog.client.messages, "create", new_callable=AsyncMock) as mock_create:
             await cog.on_message(message)
@@ -471,7 +484,7 @@ class TestRateLimiting:
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
         # Simulate a request from long ago
-        cog_feature._last_request[77777] = time.monotonic() - 999
+        cog_feature._last_request[77777] = time.time() - 999
 
         planning_response = MagicMock()
         planning_response.content = [MagicMock(text="Let me evaluate this request.")]
@@ -762,7 +775,7 @@ class TestStartFromIntent:
         cog = cog_feature.FeatureRequestCog(mock_bot)
 
         with (
-            patch.object(cog_feature, "_last_request", {55555: time.monotonic()}),
+            patch.object(cog_feature, "_last_request", {55555: time.time()}),
             patch.object(cog_feature, "_sessions", {}),
         ):
             await cog.start_from_intent(message, "add dice roll", "plugin")
@@ -884,7 +897,7 @@ class TestThreadSession:
             thread_id=1, user_id=2, request_type="plugin",
             original_description="test",
         )
-        session.last_active = time.monotonic()
+        session.last_active = time.time()
         assert not cog_feature._check_session_timeout(session)
 
     def test_check_session_timeout_expired(self) -> None:
@@ -892,7 +905,7 @@ class TestThreadSession:
             thread_id=1, user_id=2, request_type="plugin",
             original_description="test",
         )
-        session.last_active = time.monotonic() - 2000
+        session.last_active = time.time() - 2000
         assert cog_feature._check_session_timeout(session)
 
     def test_is_confirmation(self) -> None:
@@ -1174,7 +1187,7 @@ class TestThreadConversation:
             original_description="add a leaderboard",
         )
         # Set last_active to well past the timeout
-        session.last_active = time.monotonic() - 2000
+        session.last_active = time.time() - 2000
         cog_feature._sessions[5000] = session
 
         message = _make_thread_message(5000, 111, "hello?")
@@ -1397,3 +1410,250 @@ class TestThreadConversation:
             send_text = mock_thread.send.call_args[0][0]
             assert "go" in send_text.lower()
             assert "---PLAN_READY---" not in send_text
+
+
+class TestCodeGenFailureRetry:
+    """Tests that code gen failure keeps session alive for retry."""
+
+    def setup_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    def teardown_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    @pytest.mark.asyncio
+    async def test_generic_failure_keeps_session(self) -> None:
+        """Non-ValueError failure reverts state to plan_ready and keeps session."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+            refined_description="Create a leaderboard plugin",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "go")
+
+        with (
+            patch.object(
+                cog, "_handle_request",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("git push failed"),
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(message)
+
+        # Session should still exist in plan_ready state
+        assert 5000 in cog_feature._sessions
+        assert session.state == "plan_ready"
+        # User should be told they can retry
+        send_calls = [str(c) for c in message.channel.send.call_args_list]
+        assert any("go" in c.lower() for c in send_calls)
+
+    @pytest.mark.asyncio
+    async def test_transient_failure_keeps_session(self) -> None:
+        """Transient API failure reverts state to plan_ready."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+            refined_description="Create a leaderboard plugin",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "go")
+
+        with (
+            patch.object(
+                cog, "_handle_request",
+                new_callable=AsyncMock,
+                side_effect=anthropic.APITimeoutError(request=None),
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(message)
+
+        assert 5000 in cog_feature._sessions
+        assert session.state == "plan_ready"
+
+    @pytest.mark.asyncio
+    async def test_policy_violation_removes_session(self) -> None:
+        """ValueError (policy violation) still removes the session."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+            refined_description="Create a leaderboard plugin",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "go")
+
+        with (
+            patch.object(
+                cog, "_handle_request",
+                new_callable=AsyncMock,
+                side_effect=ValueError("Security policy violations"),
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.on_message(message)
+
+        assert 5000 not in cog_feature._sessions
+
+
+class TestSessionPersistence:
+    """Tests for session_store integration in cog_feature."""
+
+    def setup_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    def teardown_method(self) -> None:
+        cog_feature._sessions.clear()
+        cog_feature._last_request.clear()
+
+    @pytest.mark.asyncio
+    async def test_session_saved_on_creation(self) -> None:
+        """Session is persisted to DB when created in start_from_intent."""
+        message = AsyncMock()
+        message.content = "add a dice roll command"
+        message.channel = MagicMock()
+        message.channel.id = 12345
+        message.reply = AsyncMock()
+        message.author = _make_author(user_id=55555, has_role=True)
+
+        mock_thread = AsyncMock()
+        mock_thread.id = 99900
+        mock_thread.send = AsyncMock()
+        mock_thread.typing = MagicMock(return_value=AsyncMock())
+        message.create_thread = AsyncMock(return_value=mock_thread)
+
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(text="What kind of dice?")]
+
+        save_calls = []
+
+        with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_response,
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch.object(
+                session_store, "save_session",
+                side_effect=lambda s: save_calls.append(s.state),
+            ),
+        ):
+            await cog.start_from_intent(message, "add dice roll", "plugin")
+
+        # save_session called twice: once on creation, once after planning reply
+        assert len(save_calls) == 2
+        assert save_calls[0] == "discussing"
+        assert save_calls[1] == "discussing"
+
+    @pytest.mark.asyncio
+    async def test_session_deleted_on_cancel(self) -> None:
+        """Session is deleted from DB when user cancels."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "cancel")
+
+        delete_calls = []
+        with patch.object(
+            session_store, "delete_session",
+            side_effect=lambda tid: delete_calls.append(tid),
+        ):
+            await cog.on_message(message)
+
+        assert delete_calls == [5000]
+
+    @pytest.mark.asyncio
+    async def test_session_deleted_on_success(self) -> None:
+        """Session is deleted from DB after successful PR creation."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="plan_ready",
+            refined_description="Create a leaderboard plugin",
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "go")
+
+        delete_calls = []
+        with (
+            patch.object(
+                cog, "_handle_request",
+                new_callable=AsyncMock,
+                return_value="https://github.com/user/repo/pull/42",
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+            patch.object(
+                session_store, "delete_session",
+                side_effect=lambda tid: delete_calls.append(tid),
+            ),
+        ):
+            await cog.on_message(message)
+
+        assert delete_calls == [5000]
+
+    def test_sessions_restored_on_init(self) -> None:
+        """Active sessions are loaded from DB into _sessions on cog init."""
+        now = time.time()
+        stored = [{
+            "thread_id": 7000,
+            "user_id": 333,
+            "request_type": "plugin",
+            "original_description": "add something",
+            "messages": [{"role": "user", "content": "hi"}],
+            "state": "plan_ready",
+            "refined_description": "plan text",
+            "created_at": now - 100,
+            "last_active": now - 10,
+        }]
+        sessions_dict: dict = {}
+        last_req_dict: dict = {}
+        with (
+            patch.object(cog_feature, "_sessions", sessions_dict),
+            patch.object(cog_feature, "_last_request", last_req_dict),
+            patch.object(session_store, "load_active_sessions", return_value=stored),
+            patch.object(session_store, "load_cooldowns", return_value={333: now - 50}),
+        ):
+            mock_bot = MagicMock()
+            cog_feature.FeatureRequestCog(mock_bot)
+
+            assert 7000 in sessions_dict
+            session = sessions_dict[7000]
+            assert session.state == "plan_ready"
+            assert session.user_id == 333
+            assert session.messages == [{"role": "user", "content": "hi"}]
+            assert last_req_dict[333] == pytest.approx(now - 50)
