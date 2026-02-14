@@ -17,11 +17,12 @@ When you @mention the Bot, the text of your message (with the mention stripped) 
 
 ### 1.2 Feature Request Content
 
-When you submit a feature request or bot improvement, the description you provide is:
+When you submit a feature request or bot improvement, the Bot creates a **Discord thread** for a collaborative planning conversation. During this process:
 
-- Sent to the Anthropic Claude API for code generation
-- Included in git commit messages and pull request descriptions on GitHub
-- Logged to the designated admin channel on Discord
+- Your request description and all follow-up messages in the thread are sent to the Anthropic Claude API for planning and code generation
+- The conversation history for the thread is stored in application memory (RAM) for the duration of the session (up to 30 minutes of inactivity) and is lost on Bot restart
+- The final feature description is included in git commit messages and pull request descriptions on GitHub
+- Feature request activity is logged to the designated admin channel on Discord
 
 ### 1.3 User Metadata
 
@@ -40,7 +41,7 @@ The Bot relies on the following third-party services, each with their own privac
 | Service | Purpose | Data Sent |
 |---------|---------|-----------|
 | **Discord** | Bot platform | Messages, user metadata (per [Discord Privacy Policy](https://discord.com/privacy)) |
-| **Anthropic Claude API** | AI responses and code generation | Message text, conversation history, feature request descriptions |
+| **Anthropic Claude API** | AI responses, planning conversations, and code generation | Message text, conversation history, feature request thread messages |
 | **GitHub** | Pull request creation, deploy webhooks | Feature request descriptions, generated code, commit messages |
 
 We encourage you to review the privacy policies of these services.
@@ -54,6 +55,7 @@ We encourage you to review the privacy policies of these services.
 ## 4. Data Retention
 
 - Conversation history: retained in memory only, cleared on restart
+- Feature request thread sessions: retained in memory for up to 30 minutes of inactivity, cleared on restart
 - Feature request descriptions: retained in GitHub PRs and git history indefinitely
 - Admin log messages: retained in Discord per Discord's data retention policies
 - Plugin data: retained until manually deleted or the plugin is removed

@@ -37,6 +37,8 @@ cp .env.example .env
 | `WEBHOOK_SECRET` | GitHub webhook HMAC secret | *(required)* |
 | `WEBHOOK_PORT` | Port for the webhook listener | `8080` |
 | `LOG_CHANNEL_ID` | Discord channel ID for admin/log messages | *(required)* |
+| `CLAUDE_MODEL` | Claude model for code generation | `claude-sonnet-4-5-20250929` |
+| `PLANNING_MODEL` | Claude model for planning conversations | Same as `CLAUDE_MODEL` |
 
 ## GitHub Webhook Setup
 
@@ -69,7 +71,7 @@ The supervisor manages the bot lifecycle, handles deploys on PR merge, and rolls
 @Turbot feature request: add a command that tells jokes
 ```
 
-This generates a sandboxed plugin in `plugins/`, scans it for security policy violations, and opens a PR. Requires the `BotAdmin` role (configurable).
+The bot creates a **Discord thread** and starts a collaborative planning conversation. It will ask clarifying questions, propose an implementation plan, and wait for your confirmation before generating code. Once you reply **go**, it generates a sandboxed plugin in `plugins/`, scans it for security policy violations, and opens a PR. Reply **cancel** to abort at any time. Requires the `BotAdmin` role (configurable).
 
 ### Bot Improvements (Core)
 
@@ -77,7 +79,19 @@ This generates a sandboxed plugin in `plugins/`, scans it for security policy vi
 @Turbot bot improvement: add rate limiting to chat responses
 ```
 
-This can modify any file in the project. The PR is flagged with "CORE CHANGE" and triggers an admin channel warning.
+Same conversational flow as feature requests, but this can modify any file in the project. The PR is flagged with "CORE CHANGE" and triggers an admin channel warning.
+
+### Feature Request Flow
+
+1. User submits a request in any channel
+2. Bot creates a thread and evaluates the request
+3. Bot asks clarifying questions (1-3 at a time)
+4. User and bot refine the plan collaboratively
+5. Bot proposes a plan and waits for confirmation
+6. User replies **go** to generate code, or **cancel** to abort
+7. Bot creates a PR and posts the link in the thread
+
+Sessions time out after 30 minutes of inactivity. Only the original requester can interact with the thread.
 
 ## Plugin System
 
@@ -120,12 +134,16 @@ Tests use `unittest.mock` and require no external services or environment variab
 
 **Rollback:** If the bot crashes within 30 seconds of a deploy, the supervisor reverts to the last known good commit.
 
+**API resilience:** A circuit breaker (`api_health.py`) tracks Claude API availability. After 3 consecutive connectivity failures, it stops making calls for 30 seconds (with exponential backoff up to 5 minutes), then probes with the next request to check recovery.
+
 ## Security
 
 - AST-based policy scanner rejects unsafe plugin code (forbidden imports, builtins, dunder access) before PR creation
 - Path traversal prevention in file operations
 - Webhook signature verification (HMAC-SHA256)
 - Role-gated feature requests
+- Per-user cooldown (2 minutes between requests)
+- Circuit breaker prevents cascading failures during API outages
 - All generated code goes through PR review — human approval required before merge
 - Plugin storage is isolated per-plugin
 

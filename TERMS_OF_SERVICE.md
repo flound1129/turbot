@@ -24,10 +24,12 @@ You agree not to:
 
 ## 4. Feature Requests and Generated Code
 
-- Feature requests and bot improvements submitted to the Bot may result in pull requests to the associated GitHub repository
+- Feature requests and bot improvements are handled through a **conversational planning process** in Discord threads. The Bot will ask clarifying questions and propose a plan before generating code
+- You may confirm the plan to proceed with code generation, or cancel the request at any time
+- Feature request sessions time out after 30 minutes of inactivity
 - All generated code is subject to review before merge; the Bot does not auto-apply changes
 - Generated code is provided "as is" and the operator is responsible for reviewing and approving it
-- Submitted feature request descriptions may be logged for administrative purposes
+- Submitted feature request descriptions and thread conversations may be logged for administrative purposes
 
 ## 5. No Warranty
 

@@ -231,8 +231,23 @@ class TestFeatureRequestCog:
         ):
             await cog.on_message(message)
 
+            # Build diagnostic info for CI debugging
+            diag = (
+                f"author.bot={message.author.bot!r} "
+                f"type(author.bot)={type(message.author.bot).__name__} "
+                f"bool(author.bot)={bool(message.author.bot)} "
+                f"channel.id={message.channel.id!r} "
+                f"bot.user={cog.bot.user!r} "
+                f"mentions={message.mentions!r} "
+                f"bot_user_in_mentions={cog.bot.user in message.mentions} "
+                f"content={message.content!r} "
+                f"reply_calls={message.reply.call_args_list!r} "
+                f"_sessions={cog_feature._sessions!r} "
+                f"_last_request={cog_feature._last_request!r}"
+            )
+
             # Thread should have been created
-            message.create_thread.assert_called_once()
+            assert message.create_thread.called, f"create_thread not called. {diag}"
             thread_name = message.create_thread.call_args[1]["name"]
             assert "add a ping command" in thread_name
 
@@ -243,8 +258,8 @@ class TestFeatureRequestCog:
             assert "questions" in send_text.lower()
 
             # Session should be tracked
-            assert 99900 in cog_feature._sessions
-            session = cog_feature._sessions[99900]
+            assert 99900 in sessions_dict, f"session not in dict: {sessions_dict}"
+            session = sessions_dict[99900]
             assert session.state == "discussing"
             assert session.request_type == "plugin"
 
@@ -265,9 +280,10 @@ class TestFeatureRequestCog:
             text="I can help with that! What bug are you seeing?"
         )]
 
+        sessions_dict: dict = {}
         with (
             patch.object(cog_feature, "_last_request", {}),
-            patch.object(cog_feature, "_sessions", {}),
+            patch.object(cog_feature, "_sessions", sessions_dict),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_response,
@@ -276,9 +292,16 @@ class TestFeatureRequestCog:
         ):
             await cog.on_message(message)
 
-            message.create_thread.assert_called_once()
-            assert 99900 in cog_feature._sessions
-            session = cog_feature._sessions[99900]
+            diag = (
+                f"author.bot={message.author.bot!r} "
+                f"bool(author.bot)={bool(message.author.bot)} "
+                f"bot_user_in_mentions={cog.bot.user in message.mentions} "
+                f"content={message.content!r} "
+                f"reply_calls={message.reply.call_args_list!r}"
+            )
+            assert message.create_thread.called, f"create_thread not called. {diag}"
+            assert 99900 in sessions_dict, f"session not in dict: {sessions_dict}"
+            session = sessions_dict[99900]
             assert session.request_type == "core"
 
 
@@ -581,9 +604,18 @@ class TestCogCircuitBreaker:
         ):
             await cog.on_message(message)
 
-        mock_create.assert_not_called()
-        reply_calls = [str(c) for c in message.reply.call_args_list]
-        assert any("unavailable" in c.lower() for c in reply_calls)
+            mock_create.assert_not_called()
+            diag = (
+                f"author.bot={message.author.bot!r} "
+                f"bool(author.bot)={bool(message.author.bot)} "
+                f"bot_user_in_mentions={cog.bot.user in message.mentions} "
+                f"content={message.content!r} "
+                f"reply_calls={message.reply.call_args_list!r}"
+            )
+            reply_calls = [str(c) for c in message.reply.call_args_list]
+            assert any("unavailable" in c.lower() for c in reply_calls), (
+                f"Expected 'unavailable' reply. {diag}"
+            )
 
     @pytest.mark.asyncio
     async def test_records_success_after_code_gen(self) -> None:
@@ -643,11 +675,19 @@ class TestCogCircuitBreaker:
         ):
             await cog.on_message(message)
 
-        assert health._failures == 1
-        # Error message should be sent to the thread
-        mock_thread = message.create_thread.return_value
-        send_calls = [str(c) for c in mock_thread.send.call_args_list]
-        assert any("unavailable" in c.lower() for c in send_calls)
+            diag = (
+                f"author.bot={message.author.bot!r} "
+                f"bool(author.bot)={bool(message.author.bot)} "
+                f"bot_user_in_mentions={cog.bot.user in message.mentions} "
+                f"content={message.content!r} "
+                f"reply_calls={message.reply.call_args_list!r} "
+                f"create_thread_called={message.create_thread.called}"
+            )
+            assert health._failures == 1, f"Expected 1 failure. {diag}"
+            # Error message should be sent to the thread
+            mock_thread = message.create_thread.return_value
+            send_calls = [str(c) for c in mock_thread.send.call_args_list]
+            assert any("unavailable" in c.lower() for c in send_calls)
 
 
 class TestPlanningSystemPrompt:
@@ -1085,8 +1125,16 @@ class TestThreadConversation:
         ):
             await cog.on_message(initial_msg)
 
-            assert 5000 in cog_feature._sessions
-            session = cog_feature._sessions[5000]
+            diag = (
+                f"author.bot={initial_msg.author.bot!r} "
+                f"bool(author.bot)={bool(initial_msg.author.bot)} "
+                f"bot_user_in_mentions={cog.bot.user in initial_msg.mentions} "
+                f"content={initial_msg.content!r} "
+                f"reply_calls={initial_msg.reply.call_args_list!r} "
+                f"create_thread_called={initial_msg.create_thread.called}"
+            )
+            assert 5000 in sessions_dict, f"session not in dict. {diag}"
+            session = sessions_dict[5000]
             assert session.state == "discussing"
 
         # Step 2: User answers in thread
@@ -1154,9 +1202,10 @@ class TestThreadConversation:
             text="Simple enough! Plan: Add !ping command that replies 'Pong!'.\n---PLAN_READY---"
         )]
 
+        sessions_dict: dict = {}
         with (
             patch.object(cog_feature, "_last_request", {}),
-            patch.object(cog_feature, "_sessions", {}),
+            patch.object(cog_feature, "_sessions", sessions_dict),
             patch.object(
                 cog.client.messages, "create",
                 new_callable=AsyncMock, return_value=planning_resp,
@@ -1165,8 +1214,16 @@ class TestThreadConversation:
         ):
             await cog.on_message(initial_msg)
 
-            assert 6000 in cog_feature._sessions
-            session = cog_feature._sessions[6000]
+            diag = (
+                f"author.bot={initial_msg.author.bot!r} "
+                f"bool(author.bot)={bool(initial_msg.author.bot)} "
+                f"bot_user_in_mentions={cog.bot.user in initial_msg.mentions} "
+                f"content={initial_msg.content!r} "
+                f"reply_calls={initial_msg.reply.call_args_list!r} "
+                f"create_thread_called={initial_msg.create_thread.called}"
+            )
+            assert 6000 in sessions_dict, f"session not in dict. {diag}"
+            session = sessions_dict[6000]
             assert session.state == "plan_ready"
 
             # Thread message should contain the go prompt
