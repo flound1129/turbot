@@ -17,7 +17,7 @@ When you @mention the Bot, the text of your message (with the mention stripped) 
 
 ### 1.2 Feature Request Content
 
-When you submit a feature request or bot improvement, the Bot creates a **Discord thread** for a collaborative planning conversation. During this process:
+The Bot detects feature request intent during normal chat — no additional API call is made for intent detection. When a feature request is identified (either through natural language detection or an explicit prefix), the Bot creates a **Discord thread** for a collaborative planning conversation. During this process:
 
 - Your request description and all follow-up messages in the thread are sent to the Anthropic Claude API for planning and code generation
 - The conversation history for the thread is stored in application memory (RAM) for the duration of the session (up to 30 minutes of inactivity) and is lost on Bot restart

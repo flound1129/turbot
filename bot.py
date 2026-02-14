@@ -66,6 +66,26 @@ def _split_reply(text: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
     return chunks
 
 
+def _extract_intent(text: str) -> tuple[str, str | None]:
+    """Strip intent marker from response, return (clean_text, request_type)."""
+    stripped = text.rstrip()
+    if stripped.endswith("[FEATURE]"):
+        return stripped[: -len("[FEATURE]")].rstrip(), "plugin"
+    if stripped.endswith("[IMPROVEMENT]"):
+        return stripped[: -len("[IMPROVEMENT]")].rstrip(), "core"
+    return text, None
+
+
+async def _start_feature_request(
+    message: discord.Message, description: str, request_type: str,
+) -> None:
+    """Bridge: hand off detected intent to the FeatureRequestCog."""
+    cog = bot.get_cog("FeatureRequestCog")
+    if cog is None:
+        return
+    await cog.start_from_intent(message, description, request_type)
+
+
 @bot.event
 async def on_ready() -> None:
     print(f"Turbot is online as {bot.user} — feeling Turbotastic!")
@@ -123,8 +143,9 @@ async def on_message(message: discord.Message) -> None:
     if not bot.user or bot.user not in message.mentions:
         return
 
-    # Skip feature requests — handled by the cog
     text = re.sub(r"<@!?\d+>", "", message.content).strip()
+
+    # Skip explicit feature request prefixes — handled directly by the cog
     if text.lower().startswith(("feature request:", "bot improvement:")):
         return
 
@@ -150,29 +171,40 @@ async def on_message(message: discord.Message) -> None:
     was_recovering = claude_health.state == "half_open"
 
     try:
-        response = await claude.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=1024,
-            system=(
-                "You are Turbot, a friendly and helpful Discord bot. "
-                "You are Turbotastic — cheerful, concise, and occasionally "
-                "make fish puns. Keep replies under a few paragraphs."
-            ),
-            messages=list(history),
-        )
-        reply = response.content[0].text
+        async with message.channel.typing():
+            response = await claude.messages.create(
+                model=config.CLAUDE_MODEL,
+                max_tokens=1024,
+                system=(
+                    "You are Turbot, a friendly and helpful Discord bot. "
+                    "You are Turbotastic — cheerful, concise, and occasionally "
+                    "make fish puns. Keep replies under a few paragraphs.\n"
+                    "If the user is asking you to add a new feature or command, "
+                    "end your reply with [FEATURE].\n"
+                    "If they want a change to your core behavior, "
+                    "end with [IMPROVEMENT].\n"
+                    "Only add a marker when the intent is clear."
+                ),
+                messages=list(history),
+            )
+            raw_reply = response.content[0].text
 
-        claude_health.record_success()
-        if was_recovering:
-            await log_to_admin("**Claude API recovered** — circuit breaker reset.")
+            claude_health.record_success()
+            if was_recovering:
+                await log_to_admin("**Claude API recovered** — circuit breaker reset.")
 
-        history.append({"role": "assistant", "content": reply})
-        if len(history) > MAX_HISTORY:
-            history[:] = history[-MAX_HISTORY:]
+            reply, intent = _extract_intent(raw_reply)
 
-        # Split long replies to respect Discord's 2000-char limit
-        for chunk in _split_reply(reply):
-            await message.reply(chunk)
+            history.append({"role": "assistant", "content": reply})
+            if len(history) > MAX_HISTORY:
+                history[:] = history[-MAX_HISTORY:]
+
+            # Split long replies to respect Discord's 2000-char limit
+            for chunk in _split_reply(reply):
+                await message.reply(chunk)
+
+            if intent is not None:
+                await _start_feature_request(message, text, intent)
 
     except Exception as e:
         if is_transient(e):

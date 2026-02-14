@@ -67,24 +67,38 @@ The supervisor manages the bot lifecycle, handles deploys on PR merge, and rolls
 
 ### Feature Requests (Plugin)
 
+Just describe what you want in natural language:
+
+```
+@Turbot can you add a command that tells jokes?
+```
+
+Turbot detects the intent automatically during normal chat. When it recognizes a feature request, it creates a **Discord thread** and starts a collaborative planning conversation. It will ask clarifying questions, propose an implementation plan, and wait for your confirmation before generating code. Once you reply **go**, it generates a sandboxed plugin in `plugins/`, scans it for security policy violations, and opens a PR. Reply **cancel** to abort at any time. Requires the `BotAdmin` role (configurable).
+
+You can also use the explicit prefix if you prefer:
 ```
 @Turbot feature request: add a command that tells jokes
 ```
 
-The bot creates a **Discord thread** and starts a collaborative planning conversation. It will ask clarifying questions, propose an implementation plan, and wait for your confirmation before generating code. Once you reply **go**, it generates a sandboxed plugin in `plugins/`, scans it for security policy violations, and opens a PR. Reply **cancel** to abort at any time. Requires the `BotAdmin` role (configurable).
-
 ### Bot Improvements (Core)
 
+If Turbot detects you want to change its core behavior, it routes through the improvement flow:
+
 ```
-@Turbot bot improvement: add rate limiting to chat responses
+@Turbot can you make the error messages friendlier?
 ```
 
 Same conversational flow as feature requests, but this can modify any file in the project. The PR is flagged with "CORE CHANGE" and triggers an admin channel warning.
 
+Explicit prefix also works:
+```
+@Turbot bot improvement: add rate limiting to chat responses
+```
+
 ### Feature Request Flow
 
-1. User submits a request in any channel
-2. Bot creates a thread and evaluates the request
+1. User @mentions the bot with a request (natural language or explicit prefix)
+2. Bot detects the intent and creates a thread
 3. Bot asks clarifying questions (1-3 at a time)
 4. User and bot refine the plan collaboratively
 5. Bot proposes a plan and waits for confirmation

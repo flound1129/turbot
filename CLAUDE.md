@@ -48,8 +48,9 @@ data/               — Plugin storage (created automatically, per-plugin isolat
 ## Key Behaviors
 
 - **Chat**: @mention the bot → Claude responds with per-channel conversation memory (last 20 messages)
-- **Feature requests**: @mention with "feature request: <description>" → role check → creates Discord thread → multi-turn planning conversation with Claude → user confirms → code gen → AST scan → opens PR
-- **Bot improvements**: @mention with "bot improvement: <description>" → role check → creates Discord thread → planning conversation → user confirms → code gen → PR flagged as CORE CHANGE
+- **Intent detection**: During chat, the system prompt instructs Claude to append `[FEATURE]` or `[IMPROVEMENT]` markers when it detects the user wants a feature. The marker is stripped before display/history and routes to the feature request flow. No extra API call — piggybacks on the existing chat call.
+- **Feature requests**: Detected naturally via chat intent, or explicitly with "feature request: <description>" → role check → creates Discord thread → multi-turn planning conversation with Claude → user confirms → code gen → AST scan → opens PR
+- **Bot improvements**: Detected naturally via chat intent, or explicitly with "bot improvement: <description>" → role check → creates Discord thread → planning conversation → user confirms → code gen → PR flagged as CORE CHANGE
 - **Deploy**: GitHub webhook on PR merge → bot writes `.deploy` + exits → supervisor pulls + restarts
 - **Rollback**: If bot crashes within 30s of deploy, supervisor reverts to last known good commit
 - **Admin channel**: `LOG_CHANNEL_ID` — bot posts deploy status, errors, feature request activity, rollback alerts
@@ -58,8 +59,8 @@ data/               — Plugin storage (created automatically, per-plugin isolat
 
 Feature requests use a multi-turn thread conversation instead of one-shot code generation:
 
-1. User @mentions the bot with a feature request in a regular channel
-2. Bot creates a Discord thread from the message
+1. User @mentions the bot with a feature request (natural language or explicit prefix) in a regular channel
+2. Bot detects intent (via chat marker or prefix) and creates a Discord thread from the message
 3. Bot calls Claude (using `PLANNING_SYSTEM_PROMPT`) to evaluate the request and ask clarifying questions
 4. User and Claude go back and forth in the thread until the plan is clear
 5. When Claude is satisfied, it includes a `---PLAN_READY---` marker in its response

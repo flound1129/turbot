@@ -300,6 +300,40 @@ class TestLogToAdmin:
             await bot.log_to_admin("test message")
 
 
+class TestExtractIntent:
+    """Tests for _extract_intent helper."""
+
+    def test_feature_marker(self) -> None:
+        text, intent = bot._extract_intent("Sounds great! I can build that. [FEATURE]")
+        assert text == "Sounds great! I can build that."
+        assert intent == "plugin"
+
+    def test_improvement_marker(self) -> None:
+        text, intent = bot._extract_intent("I can tweak that for you. [IMPROVEMENT]")
+        assert text == "I can tweak that for you."
+        assert intent == "core"
+
+    def test_no_marker(self) -> None:
+        text, intent = bot._extract_intent("Hello! How can I help?")
+        assert text == "Hello! How can I help?"
+        assert intent is None
+
+    def test_marker_with_trailing_whitespace(self) -> None:
+        text, intent = bot._extract_intent("Sure thing! [FEATURE]   ")
+        assert text == "Sure thing!"
+        assert intent == "plugin"
+
+    def test_marker_in_middle_not_detected(self) -> None:
+        text, intent = bot._extract_intent("The [FEATURE] is interesting. What else?")
+        assert intent is None
+        assert "[FEATURE]" in text
+
+    def test_empty_string(self) -> None:
+        text, intent = bot._extract_intent("")
+        assert text == ""
+        assert intent is None
+
+
 class TestOnMessageSkipsPrefixes:
     """Test that on_message in bot.py skips feature request and bot improvement messages."""
 
@@ -396,6 +430,7 @@ class TestChatCircuitBreaker:
         message.author.bot = False
         message.content = "<@99999> hello"
         message.channel.id = 42
+        message.channel.typing = MagicMock(return_value=AsyncMock())
         message.reply = AsyncMock()
         message.mentions = [bot_user]
         return message
@@ -518,3 +553,160 @@ class TestChatCircuitBreaker:
 
         log_calls = [str(c) for c in mock_log.call_args_list]
         assert any("recovered" in c.lower() for c in log_calls)
+
+
+class TestIntentDetectionInChat:
+    """Tests that intent markers are stripped from replies and routing works."""
+
+    def _make_message(self, bot_user: MagicMock) -> MagicMock:
+        message = AsyncMock()
+        message.author.bot = False
+        message.content = "<@99999> can you add a dice roll command?"
+        message.channel.id = 42
+        message.channel.typing = MagicMock(return_value=AsyncMock())
+        message.reply = AsyncMock()
+        message.mentions = [bot_user]
+        return message
+
+    @pytest.mark.asyncio
+    async def test_marker_stripped_from_reply(self) -> None:
+        """[FEATURE] marker is stripped before sending reply to user."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(
+            text="Sure, I can help with that! [FEATURE]"
+        )]
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+
+        with (
+            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch.object(bot, "_start_feature_request", new_callable=AsyncMock),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            bot.channel_history.clear()
+            await bot.on_message(message)
+
+        reply_text = message.reply.call_args[0][0]
+        assert "[FEATURE]" not in reply_text
+        assert "Sure, I can help with that!" in reply_text
+
+    @pytest.mark.asyncio
+    async def test_marker_stripped_from_history(self) -> None:
+        """[FEATURE] marker is stripped before saving to conversation history."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(
+            text="I'll build that for you! [FEATURE]"
+        )]
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+
+        with (
+            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch.object(bot, "_start_feature_request", new_callable=AsyncMock),
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            bot.channel_history.clear()
+            await bot.on_message(message)
+
+        history = bot.channel_history[42]
+        assistant_msg = history[-1]
+        assert assistant_msg["role"] == "assistant"
+        assert "[FEATURE]" not in assistant_msg["content"]
+
+    @pytest.mark.asyncio
+    async def test_feature_intent_calls_bridge(self) -> None:
+        """When [FEATURE] is detected, _start_feature_request is called."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(
+            text="That sounds fun! [FEATURE]"
+        )]
+
+        bot_user = MagicMock(id=99999)
+        message = self._make_message(bot_user)
+
+        with (
+            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            bot.channel_history.clear()
+            await bot.on_message(message)
+
+        mock_bridge.assert_called_once_with(
+            message,
+            "can you add a dice roll command?",
+            "plugin",
+        )
+
+    @pytest.mark.asyncio
+    async def test_improvement_intent_calls_bridge(self) -> None:
+        """When [IMPROVEMENT] is detected, _start_feature_request is called with 'core'."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(
+            text="I can tweak that! [IMPROVEMENT]"
+        )]
+
+        bot_user = MagicMock(id=99999)
+        message = AsyncMock()
+        message.author.bot = False
+        message.content = "<@99999> make the error messages friendlier"
+        message.channel.id = 42
+        message.channel.typing = MagicMock(return_value=AsyncMock())
+        message.reply = AsyncMock()
+        message.mentions = [bot_user]
+
+        with (
+            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            bot.channel_history.clear()
+            await bot.on_message(message)
+
+        mock_bridge.assert_called_once_with(
+            message,
+            "make the error messages friendlier",
+            "core",
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_intent_no_bridge_call(self) -> None:
+        """When no marker present, _start_feature_request is NOT called."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="Hello! How can I help?")]
+
+        bot_user = MagicMock(id=99999)
+        message = AsyncMock()
+        message.author.bot = False
+        message.content = "<@99999> hello"
+        message.channel.id = 42
+        message.channel.typing = MagicMock(return_value=AsyncMock())
+        message.reply = AsyncMock()
+        message.mentions = [bot_user]
+
+        with (
+            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
+            patch.object(bot, "log_to_admin", new_callable=AsyncMock),
+        ):
+            bot.channel_history.clear()
+            await bot.on_message(message)
+
+        mock_bridge.assert_not_called()

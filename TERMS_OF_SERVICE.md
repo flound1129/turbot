@@ -24,7 +24,7 @@ You agree not to:
 
 ## 4. Feature Requests and Generated Code
 
-- Feature requests and bot improvements are handled through a **conversational planning process** in Discord threads. The Bot will ask clarifying questions and propose a plan before generating code
+- Feature requests and bot improvements can be triggered through natural language or explicit prefixes, and are handled through a **conversational planning process** in Discord threads. The Bot will ask clarifying questions and propose a plan before generating code
 - You may confirm the plan to proceed with code generation, or cancel the request at any time
 - Feature request sessions time out after 30 minutes of inactivity
 - All generated code is subject to review before merge; the Bot does not auto-apply changes

@@ -270,9 +270,10 @@ class FeatureRequestCog(commands.Cog):
                     "Generating code changes... this may take a moment."
                 )
                 try:
-                    pr_url = await self._handle_request(
-                        description, session.request_type,
-                    )
+                    async with message.channel.typing():
+                        pr_url = await self._handle_request(
+                            description, session.request_type,
+                        )
                     session.state = "done"
                     await message.channel.send(
                         f"Turbotastic! PR created: {pr_url}"
@@ -324,7 +325,8 @@ class FeatureRequestCog(commands.Cog):
         session.messages.append({"role": "user", "content": user_text})
 
         try:
-            reply_text = await self._call_planning_claude(session)
+            async with message.channel.typing():
+                reply_text = await self._call_planning_claude(session)
         except Exception as e:
             if is_transient(e):
                 claude_health.record_failure()
@@ -358,31 +360,21 @@ class FeatureRequestCog(commands.Cog):
         session.messages.append({"role": "assistant", "content": reply_text})
         await message.channel.send(display_text)
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot:
-            return
+    async def start_from_intent(
+        self,
+        message: discord.Message,
+        description: str,
+        request_type: str,
+    ) -> None:
+        """Start a feature request flow from an intent detected during chat.
 
-        # Check if this is a message in a tracked thread
-        session = _sessions.get(message.channel.id)
-        if session is not None:
-            await self._handle_thread_message(message, session)
-            return
-
-        if not self.bot.user or self.bot.user not in message.mentions:
-            return
-
-        text = message.content
-        # Strip the mention itself
-        text = re.sub(r"<@!?\d+>", "", text).strip()
-
-        request_type = _detect_request_type(text)
-        if request_type is None:
-            return  # Not a feature request — let the chat handler deal with it
-
+        Also used internally by the prefix-based on_message path. Performs role
+        check, cooldown, circuit breaker check, thread creation, and first
+        planning call.
+        """
         # Role check
         required_role = config.FEATURE_REQUEST_ROLE
-        roles = getattr(message.author, 'roles', ())
+        roles = getattr(message.author, "roles", ())
         has_role = any(r.name == required_role for r in roles)
 
         if not has_role:
@@ -391,15 +383,14 @@ class FeatureRequestCog(commands.Cog):
             )
             return
 
-        feature_desc = _extract_description(text, request_type)
-        if not feature_desc:
-            await message.reply("Please describe the feature after the request prefix.")
+        if not description:
+            await message.reply("Please describe the feature you'd like.")
             return
 
         # Per-user cooldown
         now = time.monotonic()
-        last = _last_request.get(message.author.id, 0.0)
-        if now - last < REQUEST_COOLDOWN:
+        last = _last_request.get(message.author.id)
+        if last is not None and now - last < REQUEST_COOLDOWN:
             remaining = int(REQUEST_COOLDOWN - (now - last))
             await message.reply(
                 f"Please wait {remaining} seconds before submitting another request."
@@ -420,30 +411,31 @@ class FeatureRequestCog(commands.Cog):
 
         await _log(
             f"**{label}** from {message.author} "
-            f"in <#{message.channel.id}>: {feature_desc}"
+            f"in <#{message.channel.id}>: {description}"
         )
 
         # Create a thread for the conversation
         thread = await message.create_thread(
-            name=f"Feature: {feature_desc[:80]}",
+            name=f"Feature: {description[:80]}",
         )
 
         session = ThreadSession(
             thread_id=thread.id,
             user_id=message.author.id,
             request_type=request_type,
-            original_description=feature_desc,
+            original_description=description,
         )
         _sessions[thread.id] = session
 
         # First planning call
         session.messages.append({
             "role": "user",
-            "content": f"{label}: {feature_desc}",
+            "content": f"{label}: {description}",
         })
 
         try:
-            reply_text = await self._call_planning_claude(session)
+            async with thread.typing():
+                reply_text = await self._call_planning_claude(session)
         except Exception as e:
             if is_transient(e):
                 tripped = claude_health.record_failure()
@@ -479,6 +471,31 @@ class FeatureRequestCog(commands.Cog):
 
         session.messages.append({"role": "assistant", "content": reply_text})
         await thread.send(display_text)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+
+        # Check if this is a message in a tracked thread
+        session = _sessions.get(message.channel.id)
+        if session is not None:
+            await self._handle_thread_message(message, session)
+            return
+
+        if not self.bot.user or self.bot.user not in message.mentions:
+            return
+
+        text = message.content
+        # Strip the mention itself
+        text = re.sub(r"<@!?\d+>", "", text).strip()
+
+        request_type = _detect_request_type(text)
+        if request_type is None:
+            return  # Not a feature request — let the chat handler deal with it
+
+        feature_desc = _extract_description(text, request_type)
+        await self.start_from_intent(message, feature_desc, request_type)
 
     async def _handle_request(self, description: str, request_type: str) -> str:
         """Generate code changes and create a PR."""

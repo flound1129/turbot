@@ -124,6 +124,7 @@ class TestFeatureRequestCog:
         mock_thread = AsyncMock()
         mock_thread.id = 99900
         mock_thread.send = AsyncMock()
+        mock_thread.typing = MagicMock(return_value=AsyncMock())
         message.create_thread = AsyncMock(return_value=mock_thread)
 
         bot_user = MagicMock()
@@ -430,6 +431,7 @@ class TestRateLimiting:
         mock_thread = AsyncMock()
         mock_thread.id = 99900
         mock_thread.send = AsyncMock()
+        mock_thread.typing = MagicMock(return_value=AsyncMock())
         message.create_thread = AsyncMock(return_value=mock_thread)
 
         bot_user = MagicMock()
@@ -576,6 +578,7 @@ class TestCogCircuitBreaker:
         mock_thread = AsyncMock()
         mock_thread.id = 99900
         mock_thread.send = AsyncMock()
+        mock_thread.typing = MagicMock(return_value=AsyncMock())
         message.create_thread = AsyncMock(return_value=mock_thread)
 
         bot_user = MagicMock()
@@ -690,6 +693,167 @@ class TestCogCircuitBreaker:
             assert any("unavailable" in c.lower() for c in send_calls)
 
 
+class TestStartFromIntent:
+    """Tests for start_from_intent() called by the bot.py bridge."""
+
+    def _make_message(
+        self,
+        content: str = "can you add a dice roll command?",
+        *,
+        has_role: bool = True,
+        user_id: int = 55555,
+    ) -> MagicMock:
+        message = AsyncMock()
+        message.content = content
+        message.channel = MagicMock()
+        message.channel.id = 12345
+        message.reply = AsyncMock()
+        message.author = _make_author(user_id=user_id, has_role=has_role)
+
+        mock_thread = AsyncMock()
+        mock_thread.id = 99900
+        mock_thread.send = AsyncMock()
+        mock_thread.typing = MagicMock(return_value=AsyncMock())
+        message.create_thread = AsyncMock(return_value=mock_thread)
+
+        return message
+
+    @pytest.mark.asyncio
+    async def test_rejects_without_role(self) -> None:
+        """start_from_intent rejects users without the required role."""
+        message = self._make_message(has_role=False)
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
+        ):
+            await cog.start_from_intent(message, "add dice roll", "plugin")
+
+        message.reply.assert_called_once()
+        reply_text = message.reply.call_args[0][0]
+        assert "BotAdmin" in reply_text
+        message.create_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_description(self) -> None:
+        """start_from_intent rejects empty descriptions."""
+        message = self._make_message(has_role=True)
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
+        ):
+            await cog.start_from_intent(message, "", "plugin")
+
+        message.reply.assert_called_once()
+        reply_text = message.reply.call_args[0][0]
+        assert "describe" in reply_text.lower()
+        message.create_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_within_cooldown(self) -> None:
+        """start_from_intent respects per-user cooldown."""
+        message = self._make_message(has_role=True)
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        with (
+            patch.object(cog_feature, "_last_request", {55555: time.monotonic()}),
+            patch.object(cog_feature, "_sessions", {}),
+        ):
+            await cog.start_from_intent(message, "add dice roll", "plugin")
+
+        reply_text = message.reply.call_args[0][0]
+        assert "wait" in reply_text.lower()
+        message.create_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_when_circuit_open(self) -> None:
+        """start_from_intent rejects when circuit breaker is open."""
+        message = self._make_message(has_role=True)
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        health = ClaudeHealth()
+        for _ in range(3):
+            health.record_failure()
+
+        with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {}),
+            patch("cog_feature.claude_health", health),
+        ):
+            await cog.start_from_intent(message, "add dice roll", "plugin")
+
+        reply_text = message.reply.call_args[0][0]
+        assert "unavailable" in reply_text.lower()
+        message.create_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_creates_thread_and_session(self) -> None:
+        """start_from_intent creates a thread and tracking session."""
+        message = self._make_message(has_role=True)
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(
+            text="That sounds fun! What kind of dice?"
+        )]
+
+        sessions_dict: dict = {}
+        with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", sessions_dict),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_response,
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.start_from_intent(message, "add dice roll", "plugin")
+
+        message.create_thread.assert_called_once()
+        thread_name = message.create_thread.call_args[1]["name"]
+        assert "add dice roll" in thread_name
+
+        assert 99900 in sessions_dict
+        session = sessions_dict[99900]
+        assert session.request_type == "plugin"
+        assert session.state == "discussing"
+
+    @pytest.mark.asyncio
+    async def test_core_request_type(self) -> None:
+        """start_from_intent handles 'core' request type correctly."""
+        message = self._make_message(has_role=True)
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        planning_response = MagicMock()
+        planning_response.content = [MagicMock(text="I can help with that.")]
+
+        sessions_dict: dict = {}
+        with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", sessions_dict),
+            patch.object(
+                cog.client.messages, "create",
+                new_callable=AsyncMock, return_value=planning_response,
+            ),
+            patch.object(cog_feature, "_log", new_callable=AsyncMock),
+        ):
+            await cog.start_from_intent(message, "make errors friendlier", "core")
+
+        session = sessions_dict[99900]
+        assert session.request_type == "core"
+        # First planning message should include "Bot improvement" label
+        assert "Bot improvement" in session.messages[0]["content"]
+
+
 class TestPlanningSystemPrompt:
     """Tests for the planning system prompt."""
 
@@ -764,6 +928,7 @@ def _make_thread_message(
     channel = MagicMock(spec=discord.Thread)
     channel.id = thread_id
     channel.send = AsyncMock()
+    channel.typing = MagicMock(return_value=AsyncMock())
     message.channel = channel
 
     return message
@@ -1107,6 +1272,7 @@ class TestThreadConversation:
         mock_thread = AsyncMock()
         mock_thread.id = 5000
         mock_thread.send = AsyncMock()
+        mock_thread.typing = MagicMock(return_value=AsyncMock())
         initial_msg.create_thread = AsyncMock(return_value=mock_thread)
         initial_msg.mentions = [mock_bot.user]
 
@@ -1194,6 +1360,7 @@ class TestThreadConversation:
         mock_thread = AsyncMock()
         mock_thread.id = 6000
         mock_thread.send = AsyncMock()
+        mock_thread.typing = MagicMock(return_value=AsyncMock())
         initial_msg.create_thread = AsyncMock(return_value=mock_thread)
 
         # Claude immediately proposes a plan
