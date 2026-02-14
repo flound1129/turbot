@@ -274,7 +274,7 @@ async def webhook_handler(request: web.Request) -> web.Response:
 
 
 def _graceful_exit() -> None:
-    os._exit(0)
+    raise SystemExit(0)
 
 
 async def start_webhook_server() -> web.AppRunner:

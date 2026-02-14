@@ -49,7 +49,7 @@ async def create_branch(name: str) -> str:
 def apply_changes(changes: list[dict[str, str]]) -> None:
     for change in changes:
         path = os.path.normpath(os.path.join(PROJECT_DIR, change["path"]))
-        if not path.startswith(PROJECT_DIR):
+        if not path.startswith(PROJECT_DIR + os.sep) and path != PROJECT_DIR:
             raise ValueError(f"Path traversal detected: {change['path']}")
         action = change["action"]
         if action in ("create", "modify"):

@@ -105,6 +105,18 @@ class TestPathTraversal:
                     "content": "hacked",
                 }])
 
+    def test_rejects_sibling_directory_prefix(self, tmp_path: str) -> None:
+        """Sibling dir with matching prefix (e.g. turbot-evil) is rejected."""
+        project_dir = str(tmp_path / "turbot")
+        os.makedirs(project_dir)
+        with patch.object(github_ops, "PROJECT_DIR", project_dir):
+            with pytest.raises(ValueError, match="Path traversal detected"):
+                github_ops.apply_changes([{
+                    "path": "../turbot-evil/payload.py",
+                    "action": "create",
+                    "content": "hacked",
+                }])
+
 
 class TestCreateBranch:
     @pytest.mark.asyncio
