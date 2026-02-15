@@ -290,9 +290,14 @@ async def webhook_handler(request: web.Request) -> web.Response:
     return web.Response(text="OK")
 
 
+_shutdown_task: asyncio.Task[None] | None = None
+
+
 def _schedule_shutdown() -> None:
     """Schedule a clean shutdown via bot.close(), which unblocks bot.start()."""
-    asyncio.get_running_loop().create_task(bot.close())
+    global _shutdown_task
+    if _shutdown_task is None:
+        _shutdown_task = asyncio.get_running_loop().create_task(bot.close())
 
 
 async def shutdown_handler(request: web.Request) -> web.Response:
@@ -348,6 +353,13 @@ async def main() -> None:
     try:
         await bot.start(config.DISCORD_TOKEN)
     finally:
+        if _shutdown_task is not None:
+            await _shutdown_task
+        if not bot.is_closed():
+            await bot.close()
+        # aiohttp needs a tick to clean up transports after session.close()
+        # https://docs.aiohttp.org/en/stable/client_advanced.html#graceful-shutdown
+        await asyncio.sleep(0.25)
         await runner.cleanup()
 
 
