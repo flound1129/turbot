@@ -8,13 +8,14 @@ The name is a fish pun (turbot = flatfish + bot). The adjective is **Turbotastic
 
 ## Architecture
 
-**Two-process model:**
-- `supervisor.py` is the entry point — runs `bot.py` as a subprocess, monitors health, handles deploy + rollback
-- `bot.py` is the Discord bot + an aiohttp webhook server running in parallel
+**systemd + deploy script model:**
+- `bot.py` is the main process, managed by a user-level systemd service (`turbot.service`)
+- `deploy.py` is a standalone deploy script spawned by bot.py on webhook, runs in its own systemd scope
+- systemd handles: process restart on crash (`Restart=on-failure`), clean shutdown via SIGTERM (`TimeoutStopSec=15`), logging (journald), boot start
 
-**Communication between them:**
-- `.deploy` signal file: bot writes it when a merged PR webhook arrives, then exits. Supervisor sees it and does git pull + restart.
-- `.status` JSON file: supervisor writes it before restarting the bot to communicate what happened (deploy success, rollback, restart). Bot reads it in `on_ready` and reports to the admin channel.
+**Communication:**
+- `.status` JSON file: deploy script writes it before restarting the bot to communicate what happened (deploy success, rollback). Bot reads it in `on_ready` and reports to the admin channel.
+- bot.py handles SIGTERM via `loop.add_signal_handler()` → `_schedule_shutdown()` → clean Discord disconnect
 
 ## Plugin System
 
@@ -30,8 +31,9 @@ The name is a fish pun (turbot = flatfish + bot). The adjective is **Turbotastic
 ## File Layout
 
 ```
-supervisor.py       — Entry point. Bot lifecycle, deploy, rollback
-bot.py              — Discord bot + GitHub webhook server (aiohttp)
+bot.py              — Discord bot + GitHub webhook server (aiohttp). Main process.
+deploy.py           — Deploy script (git pull, pip install, health check, rollback)
+turbot.service      — systemd user service unit file
 cog_feature.py      — Feature request cog (dual-path: plugin vs core)
 command_registry.py — AST command scanner + SQLite registry for collision prevention
 github_ops.py       — Git/GitHub helpers (branch, commit, push, PR via gh CLI)
@@ -54,10 +56,9 @@ data/               — Plugin + session storage (created automatically)
 - **Intent detection**: During chat, the system prompt instructs Claude to append `[FEATURE]` or `[IMPROVEMENT]` markers when it detects the user wants a feature. The marker is stripped before display/history and routes to the feature request flow. No extra API call — piggybacks on the existing chat call.
 - **Feature requests**: Detected naturally via chat intent, or explicitly with "feature request: <description>" → role check → creates Discord thread → multi-turn planning conversation with Claude → user confirms → code gen → AST scan → collision check → opens PR
 - **Bot improvements**: Detected naturally via chat intent, or explicitly with "bot improvement: <description>" → role check → creates Discord thread → planning conversation → user confirms → code gen → PR flagged as CORE CHANGE
-- **Deploy**: GitHub webhook on PR merge → bot writes `.deploy` + exits → supervisor pulls + restarts
-- **Graceful shutdown**: Supervisor stops the bot via POST `/shutdown` webhook (authenticated with `X-Shutdown-Secret` header, 10s timeout), falling back to SIGTERM then SIGKILL
-- **Rollback**: If bot crashes within 30s of deploy, supervisor resets `main` to last known good commit
-- **Log rotation**: Supervisor rotates its log file at 5 MB
+- **Deploy**: GitHub webhook on PR merge → bot spawns `deploy.py` in a separate systemd scope → deploy script stops the service, pulls, installs deps, restarts, and health-checks
+- **Graceful shutdown**: systemd sends SIGTERM → bot handles via `_schedule_shutdown()` → clean Discord disconnect. `TimeoutStopSec=15` falls back to SIGKILL. Manual shutdown also possible via POST `/shutdown` endpoint (authenticated with `X-Shutdown-Secret` header).
+- **Rollback**: If bot crashes within 30s of deploy, `deploy.py` resets `main` to last known good commit
 - **Admin channel**: `LOG_CHANNEL_ID` — bot posts deploy status, errors, feature request activity, rollback alerts
 
 ## Conversational Feature Request Flow

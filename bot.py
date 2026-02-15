@@ -4,6 +4,9 @@ import hmac
 import json
 import os
 import re
+import signal
+import subprocess
+import sys
 from collections import OrderedDict
 
 import anthropic
@@ -16,7 +19,6 @@ import command_registry
 import config
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
-DEPLOY_SIGNAL: str = os.path.join(PROJECT_DIR, ".deploy")
 STATUS_FILE: str = os.path.join(PROJECT_DIR, ".status")
 MAX_HISTORY: int = 20
 DISCORD_MSG_LIMIT: int = 2000
@@ -99,7 +101,7 @@ async def on_ready() -> None:
         print(f"Slash command sync failed: {e}")
         await log_to_admin(f"**Slash command sync failed**: {e}")
 
-    # Check if the supervisor left a status message for us
+    # Check if the deploy script left a status message for us
     if os.path.exists(STATUS_FILE):
         try:
             with open(STATUS_FILE, encoding="utf-8") as f:
@@ -270,12 +272,20 @@ async def webhook_handler(request: web.Request) -> web.Response:
         pr_url = pr.get("html_url", "")
         await log_to_admin(
             f"**PR merged** — [{pr_title}]({pr_url})\n"
-            f"Shutting down for deploy. Be right back!"
+            f"Deploying now. Be right back!"
         )
-        with open(DEPLOY_SIGNAL, "w", encoding="utf-8") as f:
-            f.write("deploy")
-        # Give a moment for the message to send and response to flush
-        asyncio.get_running_loop().call_later(2, _schedule_shutdown)
+        # Spawn deploy script in a separate systemd scope so it survives
+        # the bot service being stopped during deploy
+        subprocess.Popen(
+            [
+                "systemd-run", "--user", "--scope", "--",
+                sys.executable, os.path.join(PROJECT_DIR, "deploy.py"),
+            ],
+            cwd=PROJECT_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     return web.Response(text="OK")
 
@@ -311,6 +321,9 @@ async def start_webhook_server() -> web.AppRunner:
 # ---------------------------------------------------------------------------
 
 async def main() -> None:
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, _schedule_shutdown)
+
     runner = await start_webhook_server()
 
     # Load the feature request cog

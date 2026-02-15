@@ -1,0 +1,15 @@
+[Unit]
+Description=Turbot Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/turbot
+ExecStart=%h/turbot/venv/bin/python3 bot.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

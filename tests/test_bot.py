@@ -102,10 +102,9 @@ class TestWebhookHandler:
             assert resp.status == 200
             text = await resp.text()
             assert text == "OK"
-            assert not os.path.exists(bot.DEPLOY_SIGNAL)
 
     @pytest.mark.asyncio
-    async def test_merged_pr_writes_deploy_signal(self) -> None:
+    async def test_merged_pr_spawns_deploy(self) -> None:
         payload = json.dumps({
             "action": "closed",
             "pull_request": {
@@ -118,7 +117,7 @@ class TestWebhookHandler:
         async with TestClient(TestServer(app)) as client:
             with (
                 patch.object(bot, "log_to_admin", new_callable=AsyncMock),
-                patch.object(bot, "_schedule_shutdown"),  # prevent shutdown
+                patch("subprocess.Popen") as mock_popen,
             ):
                 resp = await client.post(
                     "/webhook",
@@ -129,9 +128,10 @@ class TestWebhookHandler:
                     },
                 )
                 assert resp.status == 200
-                assert os.path.exists(bot.DEPLOY_SIGNAL)
-                # Clean up
-                os.remove(bot.DEPLOY_SIGNAL)
+                mock_popen.assert_called_once()
+                cmd = mock_popen.call_args[0][0]
+                assert cmd[:4] == ["systemd-run", "--user", "--scope", "--"]
+                assert cmd[-1].endswith("deploy.py")
 
 
 class TestShutdownHandler:
