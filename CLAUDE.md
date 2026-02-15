@@ -55,7 +55,9 @@ data/               — Plugin + session storage (created automatically)
 - **Feature requests**: Detected naturally via chat intent, or explicitly with "feature request: <description>" → role check → creates Discord thread → multi-turn planning conversation with Claude → user confirms → code gen → AST scan → collision check → opens PR
 - **Bot improvements**: Detected naturally via chat intent, or explicitly with "bot improvement: <description>" → role check → creates Discord thread → planning conversation → user confirms → code gen → PR flagged as CORE CHANGE
 - **Deploy**: GitHub webhook on PR merge → bot writes `.deploy` + exits → supervisor pulls + restarts
-- **Rollback**: If bot crashes within 30s of deploy, supervisor reverts to last known good commit
+- **Graceful shutdown**: Supervisor stops the bot via POST `/shutdown` webhook (authenticated with `X-Shutdown-Secret` header, 10s timeout), falling back to SIGTERM then SIGKILL
+- **Rollback**: If bot crashes within 30s of deploy, supervisor resets `main` to last known good commit
+- **Log rotation**: Supervisor rotates its log file at 5 MB
 - **Admin channel**: `LOG_CHANNEL_ID` — bot posts deploy status, errors, feature request activity, rollback alerts
 
 ## Conversational Feature Request Flow
@@ -163,7 +165,9 @@ Feature requests use a multi-turn thread conversation instead of one-shot code g
 - **Command registry** (`command_registry.py`) prevents generated plugins from claiming already-taken command names
 - **AST policy scanner** (`policy.py`) rejects plugin code that uses forbidden imports, builtins, or dunder access before any PR is created
 - **Security policy** (`SECURITY_POLICY.md`) is injected into every Claude code-generation prompt — defines allowed/forbidden lists
-- **Path traversal prevention** in `github_ops.apply_changes()` — rejects paths that escape the project directory
+- **Path traversal prevention** in `github_ops.apply_changes()` — rejects empty paths and paths that escape the project directory
+- **Branch name uniqueness** — `github_ops.create_branch()` appends a random 6-char hex suffix to prevent collisions between concurrent requests
+- **Webhook size limit** — aiohttp server rejects payloads over 1 MB
 - Webhook signature verification (HMAC-SHA256) prevents spoofed deploys
 - Role gating prevents unauthorized feature requests
 - Claude-generated code goes through PR review — human must approve before merge
