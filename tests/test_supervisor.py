@@ -126,7 +126,7 @@ class TestRollback:
             patch.object(supervisor, "install_deps") as mock_deps,
         ):
             supervisor.rollback("abc123")
-            mock_git.assert_any_call(["checkout", "abc123"])
+            mock_git.assert_any_call(["checkout", "main"])
             mock_git.assert_any_call(["reset", "--hard", "abc123"])
             mock_deps.assert_called_once()
 

@@ -110,7 +110,8 @@ def get_taken_names() -> dict[str, list[str]]:
     commands = get_all_commands()
     result: dict[str, list[str]] = {"slash": [], "prefix": []}
     for cmd in commands:
-        result.setdefault(cmd.command_type, []).append(cmd.command_name)
+        if cmd.command_type in result:
+            result[cmd.command_type].append(cmd.command_name)
     return result
 
 

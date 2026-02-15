@@ -334,6 +334,8 @@ class FeatureRequestCog(commands.Cog):
             messages=session.messages,
         )
         claude_health.record_success()
+        if not response.content:
+            raise ValueError("Claude returned an empty response")
         return response.content[0].text
 
     async def _handle_thread_message(
@@ -503,10 +505,7 @@ class FeatureRequestCog(commands.Cog):
             return
 
         # Prevent duplicate threads — one active session per user
-        if any(
-            s.user_id == message.author.id and s.state not in ("done",)
-            for s in _sessions.values()
-        ):
+        if any(s.user_id == message.author.id for s in _sessions.values()):
             await message.reply(
                 "You already have an active feature request. "
                 "Finish or cancel it first!"
@@ -683,6 +682,8 @@ class FeatureRequestCog(commands.Cog):
         )
         claude_health.record_success()
 
+        if not response.content:
+            raise ValueError("Claude returned an empty response")
         raw: str = response.content[0].text
         # Strip markdown fences if Claude added them despite instructions
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -706,8 +707,8 @@ class FeatureRequestCog(commands.Cog):
                 _record_step(session, STEP_CODE_GEN, "failed",
                              error="unexpected response format")
             raise ValueError("Claude returned an unexpected response format.")
-        summary: str = result.get("summary", description)
-        title: str = result.get("title", f"Feature: {description[:50]}")
+        summary = str(result.get("summary") or description)
+        title = str(result.get("title") or f"Feature: {description[:50]}")
 
         if session:
             _record_step(session, STEP_CODE_GEN, "completed",
@@ -801,7 +802,7 @@ class FeatureRequestCog(commands.Cog):
             finally:
                 # Always return to main, even on failure
                 try:
-                    await github_ops._run(["git", "checkout", "-f", "main"])
+                    await github_ops.checkout_main()
                 except Exception:
                     pass
 

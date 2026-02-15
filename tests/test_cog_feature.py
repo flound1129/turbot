@@ -399,7 +399,7 @@ class TestCoreChangeFlag:
             patch("github_ops.apply_changes"),
             patch("github_ops.commit_and_push", new_callable=AsyncMock),
             patch("github_ops.open_pr", new_callable=AsyncMock, return_value="https://github.com/pr/1") as mock_pr,
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             await cog._handle_request("fix something", "core")
 
@@ -587,13 +587,13 @@ class TestGitCleanup:
             patch("github_ops.create_branch", new_callable=AsyncMock, return_value="feature/test"),
             patch("github_ops.apply_changes"),
             patch("github_ops.commit_and_push", new_callable=AsyncMock, side_effect=RuntimeError("push failed")),
-            patch("github_ops._run", new_callable=AsyncMock) as mock_git_run,
+            patch("github_ops.checkout_main", new_callable=AsyncMock) as mock_checkout,
         ):
             with pytest.raises(RuntimeError, match="push failed"):
                 await cog._handle_request("test feature", "plugin")
 
-        # Verify cleanup happened — git checkout -f main was called
-        mock_git_run.assert_called_with(["git", "checkout", "-f", "main"])
+        # Verify cleanup happened — checkout_main was called
+        mock_checkout.assert_called_once()
 
 
 class TestCogCircuitBreaker:
@@ -686,7 +686,7 @@ class TestCogCircuitBreaker:
             patch("github_ops.apply_changes"),
             patch("github_ops.commit_and_push", new_callable=AsyncMock),
             patch("github_ops.open_pr", new_callable=AsyncMock, return_value="https://github.com/pr/1"),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             await cog._handle_request("add a joke command", "plugin")
 
@@ -1894,7 +1894,7 @@ class TestHandleRequestSteps:
             patch("github_ops.commit_and_push", new_callable=AsyncMock),
             patch("github_ops.open_pr", new_callable=AsyncMock,
                   return_value="https://github.com/pr/42"),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             pr_url = await cog._handle_request(
                 "add a leaderboard", "plugin", session=session,
@@ -1947,7 +1947,7 @@ class TestHandleRequestSteps:
             patch("github_ops.commit_and_push", new_callable=AsyncMock),
             patch("github_ops.open_pr", new_callable=AsyncMock,
                   return_value="https://github.com/pr/1"),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             pr_url = await cog._handle_request("test feature", "plugin")
 
@@ -1985,7 +1985,7 @@ class TestHandleRequestSteps:
             patch("github_ops.apply_changes"),
             patch("github_ops.commit_and_push", new_callable=AsyncMock,
                   side_effect=RuntimeError("push failed")),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             with pytest.raises(RuntimeError, match="push failed"):
                 await cog._handle_request(
@@ -2037,7 +2037,7 @@ class TestHandleRequestSteps:
             patch("github_ops.commit_and_push", new_callable=AsyncMock),
             patch("github_ops.open_pr", new_callable=AsyncMock,
                   return_value="https://github.com/pr/1"),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             await cog._handle_request("fix a bug", "core", session=session)
 
@@ -2129,7 +2129,7 @@ class TestCommandCollisionCheck:
             patch("github_ops.commit_and_push", new_callable=AsyncMock),
             patch("github_ops.open_pr", new_callable=AsyncMock,
                   return_value="https://github.com/pr/5"),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             pr_url = await cog._handle_request("add weather command", "plugin")
 
@@ -2170,7 +2170,7 @@ class TestCommandCollisionCheck:
             patch("github_ops.commit_and_push", new_callable=AsyncMock),
             patch("github_ops.open_pr", new_callable=AsyncMock,
                   return_value="https://github.com/pr/1"),
-            patch("github_ops._run", new_callable=AsyncMock),
+            patch("github_ops.checkout_main", new_callable=AsyncMock),
         ):
             await cog._handle_request("fix a bug", "core", session=session)
 

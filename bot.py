@@ -201,6 +201,8 @@ async def on_message(message: discord.Message) -> None:
                 ),
                 messages=list(history),
             )
+            if not response.content:
+                raise ValueError("Claude returned an empty response")
             raw_reply = response.content[0].text
 
             claude_health.record_success()
@@ -262,8 +264,8 @@ async def webhook_handler(request: web.Request) -> web.Response:
         return web.Response(text="Ignored event")
 
     data: dict[str, object] = json.loads(payload)
-    if data.get("action") == "closed" and data.get("pull_request", {}).get("merged"):
-        pr = data["pull_request"]
+    pr = data.get("pull_request")
+    if data.get("action") == "closed" and isinstance(pr, dict) and pr.get("merged"):
         pr_title = pr.get("title", "unknown")
         pr_url = pr.get("html_url", "")
         await log_to_admin(

@@ -51,8 +51,11 @@ async def create_branch(name: str) -> str:
 
 def apply_changes(changes: list[dict[str, str]]) -> None:
     for change in changes:
-        path = os.path.normpath(os.path.join(PROJECT_DIR, change["path"]))
-        if not path.startswith(PROJECT_DIR + os.sep) and path != PROJECT_DIR:
+        raw_path = change.get("path", "")
+        if not raw_path:
+            raise ValueError("Empty path in change")
+        path = os.path.normpath(os.path.join(PROJECT_DIR, raw_path))
+        if not path.startswith(PROJECT_DIR + os.sep):
             raise ValueError(f"Path traversal detected: {change['path']}")
         action = change["action"]
         if action in ("create", "modify"):
@@ -92,6 +95,11 @@ async def open_pr(branch: str, title: str, body: str) -> str:
 
 async def get_current_commit() -> str:
     return await _run(["git", "rev-parse", "HEAD"])
+
+
+async def checkout_main() -> None:
+    """Force-checkout main branch."""
+    await _run(["git", "checkout", "-f", "main"])
 
 
 async def checkout_and_pull(ref: str) -> None:

@@ -75,7 +75,7 @@ def install_deps() -> None:
 
 def rollback(commit: str) -> None:
     log(f"Rolling back to {commit}")
-    run_git(["checkout", commit])
+    run_git(["checkout", "main"])
     run_git(["reset", "--hard", commit])
     install_deps()
 

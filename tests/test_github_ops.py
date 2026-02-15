@@ -131,6 +131,15 @@ class TestPathTraversal:
                     "content": "hacked",
                 }])
 
+    def test_rejects_empty_path(self, tmp_path: str) -> None:
+        with patch.object(github_ops, "PROJECT_DIR", str(tmp_path)):
+            with pytest.raises(ValueError, match="Empty path"):
+                github_ops.apply_changes([{
+                    "path": "",
+                    "action": "create",
+                    "content": "data",
+                }])
+
 
 class TestCreateBranch:
     @pytest.mark.asyncio
