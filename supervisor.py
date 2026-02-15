@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 import types
+import urllib.error
+import urllib.request
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DEPLOY_SIGNAL: str = os.path.join(PROJECT_DIR, ".deploy")
@@ -16,6 +18,8 @@ GIT_TIMEOUT: int = 120  # seconds for git operations
 PIP_TIMEOUT: int = 300  # seconds for pip install
 LOG_FILE: str = os.path.join(PROJECT_DIR, "supervisor.log")
 LOG_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
+WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "8080"))
+WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
 
 shutting_down: bool = False
 
@@ -82,6 +86,56 @@ def handle_signal(signum: int, _frame: types.FrameType | None) -> None:
     log(f"Received signal {signum} — shutting down.")
 
 
+def graceful_stop(proc: subprocess.Popen, timeout: int = 10) -> None:
+    """Stop the bot gracefully via webhook, falling back to terminate/kill."""
+    # Step 1: Try HTTP shutdown request
+    if WEBHOOK_SECRET:
+        url = f"http://localhost:{WEBHOOK_PORT}/shutdown"
+        try:
+            req = urllib.request.Request(url, data=b"", method="POST")
+            req.add_header("X-Shutdown-Secret", WEBHOOK_SECRET)
+            urllib.request.urlopen(req, timeout=5)
+            log("Sent shutdown request to bot.")
+        except Exception as e:
+            log(f"Shutdown request failed: {e}")
+
+    # Step 2: Wait for process to exit
+    deadline = time.time() + timeout
+    while proc.poll() is None and time.time() < deadline:
+        time.sleep(0.5)
+
+    if proc.poll() is not None:
+        log(f"Bot exited cleanly (code {proc.returncode}).")
+        return
+
+    # Step 3: SIGTERM
+    log("Bot didn't exit in time — sending SIGTERM.")
+    proc.terminate()
+
+    term_deadline = time.time() + 3
+    while proc.poll() is None and time.time() < term_deadline:
+        time.sleep(0.5)
+
+    if proc.poll() is not None:
+        log(f"Bot exited after SIGTERM (code {proc.returncode}).")
+        return
+
+    # Step 4: SIGKILL
+    log("Bot didn't respond to SIGTERM — sending SIGKILL.")
+    proc.kill()
+    proc.wait()
+    log(f"Bot killed (code {proc.returncode}).")
+
+
+def _wait_for_exit(proc: subprocess.Popen) -> None:
+    """Wait for proc to exit, calling graceful_stop if shutdown is requested."""
+    while proc.poll() is None:
+        if shutting_down:
+            graceful_stop(proc)
+            return
+        time.sleep(1)
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -107,9 +161,9 @@ def main() -> None:
         )
 
         try:
-            proc.wait()
+            _wait_for_exit(proc)
         except Exception:
-            proc.terminate()
+            graceful_stop(proc)
             break
 
         elapsed = time.time() - start_time
@@ -166,9 +220,9 @@ def main() -> None:
                 last_known_good = get_current_commit()
                 # Continue monitoring — the bot is still running
                 try:
-                    health_proc.wait()
+                    _wait_for_exit(health_proc)
                 except Exception:
-                    health_proc.terminate()
+                    graceful_stop(health_proc)
                 elapsed = time.time() - health_start
                 log(f"Bot exited after {elapsed:.1f}s (post-deploy)")
                 # Loop continues and will restart normally

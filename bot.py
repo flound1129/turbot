@@ -283,9 +283,19 @@ def _schedule_shutdown() -> None:
     asyncio.get_running_loop().create_task(bot.close())
 
 
+async def shutdown_handler(request: web.Request) -> web.Response:
+    secret = request.headers.get("X-Shutdown-Secret", "")
+    if not hmac.compare_digest(secret, config.WEBHOOK_SECRET):
+        return web.Response(status=401, text="Invalid secret")
+
+    _schedule_shutdown()
+    return web.Response(text="Shutting down")
+
+
 async def start_webhook_server() -> web.AppRunner:
     app = web.Application(client_max_size=1024 * 1024)  # 1 MB limit
     app.router.add_post("/webhook", webhook_handler)
+    app.router.add_post("/shutdown", shutdown_handler)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.WEBHOOK_PORT)

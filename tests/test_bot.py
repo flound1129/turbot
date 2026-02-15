@@ -134,6 +134,48 @@ class TestWebhookHandler:
                 os.remove(bot.DEPLOY_SIGNAL)
 
 
+class TestShutdownHandler:
+    def _make_app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_post("/shutdown", bot.shutdown_handler)
+        return app
+
+    @pytest.mark.asyncio
+    async def test_valid_secret_triggers_shutdown(self) -> None:
+        app = self._make_app()
+        async with TestClient(TestServer(app)) as client:
+            with patch.object(bot, "_schedule_shutdown") as mock_shutdown:
+                resp = await client.post(
+                    "/shutdown",
+                    headers={"X-Shutdown-Secret": config.WEBHOOK_SECRET},
+                )
+                assert resp.status == 200
+                text = await resp.text()
+                assert "shutting down" in text.lower()
+                mock_shutdown.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_invalid_secret_rejected(self) -> None:
+        app = self._make_app()
+        async with TestClient(TestServer(app)) as client:
+            with patch.object(bot, "_schedule_shutdown") as mock_shutdown:
+                resp = await client.post(
+                    "/shutdown",
+                    headers={"X-Shutdown-Secret": "wrong-secret"},
+                )
+                assert resp.status == 401
+                mock_shutdown.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_secret_rejected(self) -> None:
+        app = self._make_app()
+        async with TestClient(TestServer(app)) as client:
+            with patch.object(bot, "_schedule_shutdown") as mock_shutdown:
+                resp = await client.post("/shutdown")
+                assert resp.status == 401
+                mock_shutdown.assert_not_called()
+
+
 class TestOnReady:
     """Tests for on_ready status file handling."""
 
