@@ -74,6 +74,21 @@ class TestReadProjectFiles:
             assert files == {}
 
 
+    def test_includes_plugins_directory(self, tmp_path: str) -> None:
+        """Core context includes plugin files."""
+        (tmp_path / "bot.py").write_text("# bot", encoding="utf-8")
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+        (plugins_dir / "__init__.py").write_text("", encoding="utf-8")
+        (plugins_dir / "ping.py").write_text("# ping plugin", encoding="utf-8")
+
+        with patch.object(cog_feature, "PROJECT_DIR", str(tmp_path)):
+            files = cog_feature._read_project_files()
+            assert "bot.py" in files
+            assert "plugins/ping.py" in files
+            assert "__init__.py" not in str(files.keys())
+
+
 class TestReadPluginContext:
     def test_reads_plugin_api(self, tmp_path: str) -> None:
         api_file = tmp_path / "plugin_api.py"
@@ -777,6 +792,29 @@ class TestStartFromIntent:
         message.create_thread.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_rejects_duplicate_active_session(self) -> None:
+        """start_from_intent rejects if user already has an active session."""
+        message = self._make_message(has_role=True)
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        existing = cog_feature.ThreadSession(
+            thread_id=88888, user_id=55555, request_type="plugin",
+            original_description="existing request",
+            state="discussing",
+        )
+
+        with (
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(cog_feature, "_sessions", {88888: existing}),
+        ):
+            await cog.start_from_intent(message, "new request", "plugin")
+
+        reply_text = message.reply.call_args[0][0]
+        assert "active feature request" in reply_text.lower()
+        message.create_thread.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_rejects_within_cooldown(self) -> None:
         """start_from_intent respects per-user cooldown."""
         message = self._make_message(has_role=True)
@@ -1149,6 +1187,34 @@ class TestThreadConversation:
 
         await cog.on_message(message)
 
+        send_text = message.channel.send.call_args[0][0]
+        assert "cancelled" in send_text.lower()
+        assert 5000 not in cog_feature._sessions
+
+    @pytest.mark.asyncio
+    async def test_cancel_in_discussing_state(self) -> None:
+        """Saying 'cancel' in discussing state ends the session."""
+        mock_bot = MagicMock()
+        cog = cog_feature.FeatureRequestCog(mock_bot)
+
+        session = cog_feature.ThreadSession(
+            thread_id=5000, user_id=111, request_type="plugin",
+            original_description="add a leaderboard",
+            state="discussing",
+            messages=[
+                {"role": "user", "content": "Feature request: add a leaderboard"},
+                {"role": "assistant", "content": "What kind of leaderboard?"},
+            ],
+        )
+        cog_feature._sessions[5000] = session
+
+        message = _make_thread_message(5000, 111, "nvm")
+
+        with patch.object(cog.client.messages, "create", new_callable=AsyncMock) as mock_create:
+            await cog.on_message(message)
+
+        # Claude should NOT be called — cancel takes priority
+        mock_create.assert_not_called()
         send_text = message.channel.send.call_args[0][0]
         assert "cancelled" in send_text.lower()
         assert 5000 not in cog_feature._sessions
@@ -1678,6 +1744,41 @@ class TestSessionPersistence:
             assert len(session.steps) == 1
             assert session.steps[0]["name"] == "code_generation"
             assert last_req_dict[333] == pytest.approx(now - 50)
+
+    def test_generating_session_reverted_on_restore(self) -> None:
+        """A session stuck in 'generating' state is reverted to 'plan_ready' on restore."""
+        now = time.time()
+        stored = [{
+            "thread_id": 8000,
+            "user_id": 444,
+            "request_type": "plugin",
+            "original_description": "add something",
+            "messages": [{"role": "user", "content": "hi"}],
+            "state": "generating",
+            "refined_description": "plan text",
+            "created_at": now - 100,
+            "last_active": now - 10,
+            "branch_name": None,
+            "pr_url": None,
+            "steps": [],
+        }]
+        sessions_dict: dict = {}
+        save_calls: list[str] = []
+        with (
+            patch.object(cog_feature, "_sessions", sessions_dict),
+            patch.object(cog_feature, "_last_request", {}),
+            patch.object(session_store, "load_active_sessions", return_value=stored),
+            patch.object(session_store, "load_cooldowns", return_value={}),
+            patch.object(session_store, "save_session",
+                         side_effect=lambda s: save_calls.append(s.state)),
+        ):
+            mock_bot = MagicMock()
+            cog_feature.FeatureRequestCog(mock_bot)
+
+            assert 8000 in sessions_dict
+            session = sessions_dict[8000]
+            assert session.state == "plan_ready"
+            assert save_calls == ["plan_ready"]
 
 
 class TestRecordStep:

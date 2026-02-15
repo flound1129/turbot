@@ -15,13 +15,29 @@ HEALTH_TIMEOUT: int = 30  # seconds — if bot crashes faster than this, it's a 
 GIT_TIMEOUT: int = 120  # seconds for git operations
 PIP_TIMEOUT: int = 300  # seconds for pip install
 LOG_FILE: str = os.path.join(PROJECT_DIR, "supervisor.log")
+LOG_MAX_BYTES: int = 5 * 1024 * 1024  # 5 MB
 
 shutting_down: bool = False
+
+
+def _rotate_log() -> None:
+    """Rotate the log file if it exceeds LOG_MAX_BYTES."""
+    if not os.path.exists(LOG_FILE):
+        return
+    try:
+        if os.path.getsize(LOG_FILE) >= LOG_MAX_BYTES:
+            rotated = LOG_FILE + ".1"
+            if os.path.exists(rotated):
+                os.remove(rotated)
+            os.rename(LOG_FILE, rotated)
+    except OSError:
+        pass
 
 
 def log(msg: str) -> None:
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line)
+    _rotate_log()
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(line + "\n")
 

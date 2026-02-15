@@ -48,6 +48,51 @@ class TestLog:
             assert "second" in content
 
 
+class TestLogRotation:
+    def test_rotates_when_exceeds_max(self, tmp_path: str) -> None:
+        """Log file is rotated when it exceeds LOG_MAX_BYTES."""
+        path = os.path.join(str(tmp_path), "supervisor.log")
+        # Write a file that exceeds the limit
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("x" * 100)
+
+        with (
+            patch.object(supervisor, "LOG_FILE", path),
+            patch.object(supervisor, "LOG_MAX_BYTES", 50),
+        ):
+            supervisor.log("new message")
+
+        # Original file should now contain only the new message
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        assert "new message" in content
+        assert "x" * 100 not in content
+
+        # Old content should be in the rotated file
+        rotated = path + ".1"
+        assert os.path.exists(rotated)
+        with open(rotated, encoding="utf-8") as f:
+            assert "x" * 100 in f.read()
+
+    def test_no_rotation_when_under_limit(self, tmp_path: str) -> None:
+        """Log file is not rotated when under the limit."""
+        path = os.path.join(str(tmp_path), "supervisor.log")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("small")
+
+        with (
+            patch.object(supervisor, "LOG_FILE", path),
+            patch.object(supervisor, "LOG_MAX_BYTES", 1000),
+        ):
+            supervisor.log("new message")
+
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        assert "small" in content
+        assert "new message" in content
+        assert not os.path.exists(path + ".1")
+
+
 class TestGetCurrentCommit:
     def test_returns_commit_hash(self) -> None:
         with patch.object(

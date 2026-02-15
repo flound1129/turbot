@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import secrets
 
 PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
 SUBPROCESS_TIMEOUT: float = 60.0
@@ -35,7 +36,9 @@ async def _run(
 
 
 def _sanitize_branch(name: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())[:60]
+    slug = re.sub(r"[^a-zA-Z0-9_-]", "-", name.lower())[:50]
+    suffix = secrets.token_hex(3)
+    return f"{slug}-{suffix}" if slug else suffix
 
 
 async def create_branch(name: str) -> str:

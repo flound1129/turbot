@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 BANNED_IMPORTS: frozenset[str] = frozenset({
     "os", "subprocess", "sys", "shutil", "importlib",
-    "ctypes", "pathlib", "signal", "socket",
+    "ctypes", "pathlib", "signal", "socket", "builtins",
 })
 
 BANNED_BUILTINS: frozenset[str] = frozenset({

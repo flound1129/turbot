@@ -146,7 +146,12 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # Let cogs and commands process first
-    await bot.process_commands(message)
+    ctx = await bot.get_context(message)
+    await bot.invoke(ctx)
+
+    # Skip chat if a prefix command was invoked (avoid double response)
+    if ctx.valid:
+        return
 
     # Only respond to @mentions
     if not bot.user or bot.user not in message.mentions:
@@ -268,17 +273,18 @@ async def webhook_handler(request: web.Request) -> web.Response:
         with open(DEPLOY_SIGNAL, "w", encoding="utf-8") as f:
             f.write("deploy")
         # Give a moment for the message to send and response to flush
-        asyncio.get_running_loop().call_later(2, _graceful_exit)
+        asyncio.get_running_loop().call_later(2, _schedule_shutdown)
 
     return web.Response(text="OK")
 
 
-def _graceful_exit() -> None:
-    raise SystemExit(0)
+def _schedule_shutdown() -> None:
+    """Schedule a clean shutdown via bot.close(), which unblocks bot.start()."""
+    asyncio.get_running_loop().create_task(bot.close())
 
 
 async def start_webhook_server() -> web.AppRunner:
-    app = web.Application()
+    app = web.Application(client_max_size=1024 * 1024)  # 1 MB limit
     app.router.add_post("/webhook", webhook_handler)
     runner = web.AppRunner(app)
     await runner.setup()

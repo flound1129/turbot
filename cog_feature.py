@@ -192,13 +192,23 @@ Do NOT include the marker until you are confident in the plan. Ask questions fir
 
 
 def _read_project_files() -> dict[str, str]:
-    """Read all .py files from the project root."""
+    """Read all .py files from the project root and plugins/ directory."""
     files: dict[str, str] = {}
     for name in os.listdir(PROJECT_DIR):
         if name.endswith(".py"):
             path = os.path.join(PROJECT_DIR, name)
             with open(path, encoding="utf-8") as f:
                 files[name] = f.read()
+
+    # Include plugins for full context on core changes
+    plugins_dir = os.path.join(PROJECT_DIR, "plugins")
+    if os.path.isdir(plugins_dir):
+        for name in sorted(os.listdir(plugins_dir)):
+            if name.endswith(".py") and name != "__init__.py":
+                path = os.path.join(plugins_dir, name)
+                with open(path, encoding="utf-8") as f:
+                    files[f"plugins/{name}"] = f.read()
+
     return files
 
 
@@ -302,6 +312,10 @@ class FeatureRequestCog(commands.Cog):
                 pr_url=row["pr_url"],
                 steps=row["steps"],
             )
+            # Revert interrupted "generating" sessions so the user can retry
+            if session.state == "generating":
+                session.state = "plan_ready"
+                session_store.save_session(session)
             _sessions[session.thread_id] = session
         cooldowns = session_store.load_cooldowns()
         _last_request.update(cooldowns)
@@ -345,6 +359,14 @@ class FeatureRequestCog(commands.Cog):
 
         session.last_active = time.time()
         user_text = message.content.strip()
+
+        # Cancel is available in any active state
+        if _is_cancellation(user_text):
+            session.state = "done"
+            _sessions.pop(session.thread_id, None)
+            session_store.delete_session(session.thread_id)
+            await message.channel.send("Request cancelled.")
+            return
 
         if session.state == "plan_ready":
             if _is_confirmation(user_text):
@@ -403,14 +425,7 @@ class FeatureRequestCog(commands.Cog):
                     )
                 return
 
-            if _is_cancellation(user_text):
-                session.state = "done"
-                _sessions.pop(session.thread_id, None)
-                session_store.delete_session(session.thread_id)
-                await message.channel.send("Request cancelled.")
-                return
-
-            # Not confirm/cancel — treat as continued discussion
+            # Not confirm — treat as continued discussion
             session.state = "discussing"
 
         # State is "discussing" — send to Claude
@@ -485,6 +500,17 @@ class FeatureRequestCog(commands.Cog):
 
         if not description:
             await message.reply("Please describe the feature you'd like.")
+            return
+
+        # Prevent duplicate threads — one active session per user
+        if any(
+            s.user_id == message.author.id and s.state not in ("done",)
+            for s in _sessions.values()
+        ):
+            await message.reply(
+                "You already have an active feature request. "
+                "Finish or cancel it first!"
+            )
             return
 
         # Per-user cooldown

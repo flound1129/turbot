@@ -10,20 +10,34 @@ import github_ops
 
 class TestSanitizeBranch:
     def test_lowercase(self) -> None:
-        assert github_ops._sanitize_branch("Hello World") == "hello-world"
+        result = github_ops._sanitize_branch("Hello World")
+        assert result.startswith("hello-world-")
+        # 6-char hex suffix after dash
+        assert len(result.split("-")[-1]) == 6
 
     def test_special_characters(self) -> None:
-        assert github_ops._sanitize_branch("add a /ping command!") == "add-a--ping-command-"
+        result = github_ops._sanitize_branch("add a /ping command!")
+        assert result.startswith("add-a--ping-command--")
 
     def test_truncation(self) -> None:
         long_name = "a" * 100
-        assert len(github_ops._sanitize_branch(long_name)) == 60
+        result = github_ops._sanitize_branch(long_name)
+        # 50 chars slug + 1 dash + 6 hex = 57
+        assert len(result) == 57
 
     def test_preserves_valid_chars(self) -> None:
-        assert github_ops._sanitize_branch("my-feature_v2") == "my-feature_v2"
+        result = github_ops._sanitize_branch("my-feature_v2")
+        assert result.startswith("my-feature_v2-")
 
     def test_empty_string(self) -> None:
-        assert github_ops._sanitize_branch("") == ""
+        result = github_ops._sanitize_branch("")
+        # Just the hex suffix
+        assert len(result) == 6
+
+    def test_unique_per_call(self) -> None:
+        a = github_ops._sanitize_branch("same name")
+        b = github_ops._sanitize_branch("same name")
+        assert a != b
 
 
 class TestApplyChanges:
@@ -123,11 +137,14 @@ class TestCreateBranch:
     async def test_creates_branch_with_sanitized_name(self) -> None:
         with patch.object(github_ops, "_run", new_callable=AsyncMock) as mock_run:
             branch = await github_ops.create_branch("Add ping command")
-            assert branch == "feature/add-ping-command"
+            assert branch.startswith("feature/add-ping-command-")
             assert mock_run.call_count == 3
             mock_run.assert_any_call(["git", "checkout", "main"])
             mock_run.assert_any_call(["git", "pull", "origin", "main"])
-            mock_run.assert_any_call(["git", "checkout", "-b", "feature/add-ping-command"])
+            # Third call is checkout -b with the full branch name
+            checkout_call = mock_run.call_args_list[2]
+            assert checkout_call[0][0][:3] == ["git", "checkout", "-b"]
+            assert checkout_call[0][0][3] == branch
 
 
 class TestCommitAndPush:

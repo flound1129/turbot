@@ -118,7 +118,7 @@ class TestWebhookHandler:
         async with TestClient(TestServer(app)) as client:
             with (
                 patch.object(bot, "log_to_admin", new_callable=AsyncMock),
-                patch.object(bot, "_graceful_exit"),  # prevent os._exit
+                patch.object(bot, "_schedule_shutdown"),  # prevent shutdown
             ):
                 resp = await client.post(
                     "/webhook",
@@ -358,7 +358,8 @@ class TestOnMessageSkipsPrefixes:
         message = self._make_message("<@99999> feature request: add ping", bot_user)
         with (
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
         ):
             await bot.on_message(message)
@@ -371,10 +372,40 @@ class TestOnMessageSkipsPrefixes:
         message = self._make_message("<@99999> bot improvement: fix bug", bot_user)
         with (
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
         ):
             await bot.on_message(message)
+        mock_create.assert_not_called()
+        message.reply.assert_not_called()
+
+
+class TestCommandMentionDedup:
+    """Test that prefix commands + @mention don't double-respond."""
+
+    @pytest.mark.asyncio
+    async def test_valid_command_skips_chat_handler(self) -> None:
+        """If a prefix command is invoked, the chat handler should not fire."""
+        bot_user = MagicMock(id=99999)
+        message = AsyncMock()
+        message.author.bot = False
+        message.content = "<@99999> !ping"
+        message.channel.id = 42
+        message.reply = AsyncMock()
+        message.mentions = [bot_user]
+
+        mock_ctx = MagicMock(valid=True)
+
+        with (
+            patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=mock_ctx),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
+            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
+        ):
+            await bot.on_message(message)
+
+        # Claude should NOT be called since a command was invoked
         mock_create.assert_not_called()
         message.reply.assert_not_called()
 
@@ -453,7 +484,8 @@ class TestChatCircuitBreaker:
         with (
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
         ):
             await bot.on_message(message)
@@ -474,7 +506,8 @@ class TestChatCircuitBreaker:
         with (
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
@@ -493,7 +526,8 @@ class TestChatCircuitBreaker:
         with (
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(
                 bot.claude.messages, "create",
                 new_callable=AsyncMock, side_effect=anthropic.APITimeoutError(request=None),
@@ -519,7 +553,8 @@ class TestChatCircuitBreaker:
         with (
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(
                 bot.claude.messages, "create",
                 new_callable=AsyncMock, side_effect=anthropic.AuthenticationError(
@@ -551,7 +586,8 @@ class TestChatCircuitBreaker:
         with (
             patch.object(bot, "claude_health", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
         ):
@@ -588,7 +624,8 @@ class TestIntentDetectionInChat:
         with (
             patch.object(bot, "claude_health", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
@@ -612,7 +649,8 @@ class TestIntentDetectionInChat:
         with (
             patch.object(bot, "claude_health", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
@@ -639,7 +677,8 @@ class TestIntentDetectionInChat:
         with (
             patch.object(bot, "claude_health", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
@@ -673,7 +712,8 @@ class TestIntentDetectionInChat:
         with (
             patch.object(bot, "claude_health", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
@@ -705,7 +745,8 @@ class TestIntentDetectionInChat:
         with (
             patch.object(bot, "claude_health", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
-            patch.object(bot.bot, "process_commands", new_callable=AsyncMock),
+            patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
+            patch.object(bot.bot, "invoke", new_callable=AsyncMock),
             patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),

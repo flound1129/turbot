@@ -10,7 +10,7 @@ class TestBannedImports:
 
     @pytest.mark.parametrize("module", [
         "os", "subprocess", "sys", "shutil", "importlib",
-        "ctypes", "pathlib", "signal", "socket",
+        "ctypes", "pathlib", "signal", "socket", "builtins",
     ])
     def test_import_banned_module(self, module: str) -> None:
         source = f"import {module}\n"
@@ -21,7 +21,7 @@ class TestBannedImports:
 
     @pytest.mark.parametrize("module", [
         "os", "subprocess", "sys", "shutil", "importlib",
-        "ctypes", "pathlib", "signal", "socket",
+        "ctypes", "pathlib", "signal", "socket", "builtins",
     ])
     def test_from_import_banned_module(self, module: str) -> None:
         source = f"from {module} import something\n"
