@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/turbot
+Environment=PYTHONUNBUFFERED=1
 ExecStart=%h/turbot/venv/bin/python3 bot.py
 Restart=on-failure
 RestartSec=5
