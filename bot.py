@@ -9,12 +9,12 @@ import subprocess
 import sys
 from collections import OrderedDict
 
-import anthropic
 import discord
 from aiohttp import web
 from discord.ext import commands
 
-from api_health import claude_health, is_transient
+import ai_client
+from api_health import claude_health, groq_health, is_transient
 import command_registry
 import config
 
@@ -31,12 +31,22 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-claude = anthropic.AsyncAnthropic(
-    api_key=config.ANTHROPIC_API_KEY,
-    timeout=anthropic.Timeout(connect=5.0, read=30.0, write=5.0, pool=10.0),
-)
 channel_history: OrderedDict[int, list[dict[str, str]]] = OrderedDict()
 MAX_CHANNELS: int = 200
+
+_CHAT_MODEL: ai_client.ProviderConfig = ai_client.ProviderConfig.parse(config.CHAT_MODEL)
+_CHAT_HEALTH = groq_health if _CHAT_MODEL.provider == "groq" else claude_health
+
+CHAT_SYSTEM_PROMPT: str = (
+    "You are Turbot, a friendly and helpful Discord bot. "
+    "You are Turbotastic — cheerful, concise, and occasionally "
+    "make fish puns. Keep replies under a few paragraphs.\n"
+    "If the user is asking you to add a new feature or command, "
+    "end your reply with [FEATURE].\n"
+    "If they want a change to your core behavior, "
+    "end with [IMPROVEMENT].\n"
+    "Only add a marker when the intent is clear."
+)
 
 
 async def log_to_admin(msg: str) -> None:
@@ -165,9 +175,9 @@ async def on_message(message: discord.Message) -> None:
     if text.lower().startswith(("feature request:", "bot improvement:")):
         return
 
-    if not claude_health.available:
+    if not _CHAT_HEALTH.available:
         await message.reply(
-            "The Claude API is currently unreachable, so I can't chat right now. "
+            "I can't chat right now — the AI is currently unreachable. "
             "I'll keep trying to reconnect — check back in a few minutes!"
         )
         return
@@ -184,32 +194,20 @@ async def on_message(message: discord.Message) -> None:
     while len(channel_history) > MAX_CHANNELS:
         channel_history.popitem(last=False)
 
-    was_recovering = claude_health.state == "half_open"
+    was_recovering = _CHAT_HEALTH.state == "half_open"
 
     try:
         async with message.channel.typing():
-            response = await claude.messages.create(
-                model=config.CLAUDE_MODEL,
-                max_tokens=1024,
-                system=(
-                    "You are Turbot, a friendly and helpful Discord bot. "
-                    "You are Turbotastic — cheerful, concise, and occasionally "
-                    "make fish puns. Keep replies under a few paragraphs.\n"
-                    "If the user is asking you to add a new feature or command, "
-                    "end your reply with [FEATURE].\n"
-                    "If they want a change to your core behavior, "
-                    "end with [IMPROVEMENT].\n"
-                    "Only add a marker when the intent is clear."
-                ),
+            raw_reply = await ai_client.complete(
+                _CHAT_MODEL,
+                system_prompt=CHAT_SYSTEM_PROMPT,
                 messages=list(history),
+                max_tokens=1024,
             )
-            if not response.content:
-                raise ValueError("Claude returned an empty response")
-            raw_reply = response.content[0].text
 
-            claude_health.record_success()
+            _CHAT_HEALTH.record_success()
             if was_recovering:
-                await log_to_admin("**Claude API recovered** — circuit breaker reset.")
+                await log_to_admin("**Chat API recovered** — circuit breaker reset.")
 
             reply, intent = _extract_intent(raw_reply)
 
@@ -226,13 +224,13 @@ async def on_message(message: discord.Message) -> None:
 
     except Exception as e:
         if is_transient(e):
-            tripped = claude_health.record_failure()
+            tripped = _CHAT_HEALTH.record_failure()
             if tripped:
                 await log_to_admin(
-                    f"**Circuit breaker opened** — Claude API appears unreachable: {e}"
+                    f"**Circuit breaker opened** — chat API appears unreachable: {e}"
                 )
             await message.reply(
-                "The Claude API is currently unreachable, so I can't chat right now. "
+                "I can't chat right now — the AI is currently unreachable. "
                 "I'll keep trying to reconnect — check back in a few minutes!"
             )
         else:

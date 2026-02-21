@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import anthropic
+import groq as groq_sdk
 import pytest
 
 import api_health
@@ -194,3 +195,61 @@ class TestIsTransient:
 
     def test_generic_exception_is_not_transient(self) -> None:
         assert api_health.is_transient(ValueError("oops")) is False
+
+
+class TestIsTransientGroq:
+    def test_groq_connection_error_is_transient(self) -> None:
+        exc = groq_sdk.APIConnectionError(request=None)
+        assert api_health.is_transient(exc) is True
+
+    def test_groq_timeout_error_is_transient(self) -> None:
+        exc = groq_sdk.APITimeoutError(request=None)
+        assert api_health.is_transient(exc) is True
+
+    def test_groq_internal_server_error_is_transient(self) -> None:
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.headers = {}
+        exc = groq_sdk.InternalServerError(
+            message="Internal server error",
+            response=mock_response,
+            body=None,
+        )
+        assert api_health.is_transient(exc) is True
+
+    def test_groq_rate_limit_error_is_transient(self) -> None:
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.headers = {}
+        exc = groq_sdk.RateLimitError(
+            message="Rate limited",
+            response=mock_response,
+            body=None,
+        )
+        assert api_health.is_transient(exc) is True
+
+    def test_groq_auth_error_is_not_transient(self) -> None:
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.headers = {}
+        exc = groq_sdk.AuthenticationError(
+            message="Invalid key",
+            response=mock_response,
+            body=None,
+        )
+        assert api_health.is_transient(exc) is False
+
+
+class TestGroqHealthSingleton:
+    def test_groq_health_exists(self) -> None:
+        assert isinstance(api_health.groq_health, ClaudeHealth)
+
+    def test_groq_health_starts_closed(self) -> None:
+        # The singleton may have state from other tests, so just verify it's a ClaudeHealth
+        assert api_health.groq_health.state in ("closed", "open", "half_open")

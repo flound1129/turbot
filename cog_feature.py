@@ -669,7 +669,7 @@ class FeatureRequestCog(commands.Cog):
             _record_step(session, STEP_CODE_GEN, "started")
 
         response = await self.client.messages.create(
-            model=config.CLAUDE_MODEL,
+            model=config.CODEGEN_MODEL,
             max_tokens=4096,
             system=system_prompt,
             messages=[{

@@ -14,6 +14,7 @@ the problem is on our side.
 import time
 
 import anthropic
+import groq as groq_sdk
 
 FAILURE_THRESHOLD: int = 3
 INITIAL_BACKOFF: float = 30.0
@@ -25,6 +26,10 @@ TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     anthropic.APITimeoutError,
     anthropic.InternalServerError,
     anthropic.RateLimitError,
+    groq_sdk.APIConnectionError,
+    groq_sdk.APITimeoutError,
+    groq_sdk.InternalServerError,
+    groq_sdk.RateLimitError,
 )
 
 
@@ -107,5 +112,6 @@ class ClaudeHealth:
         return False
 
 
-# Module-level singleton
+# Module-level singletons
 claude_health = ClaudeHealth()
+groq_health = ClaudeHealth()

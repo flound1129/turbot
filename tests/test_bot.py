@@ -9,6 +9,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
+import ai_client
 import bot
 from api_health import ClaudeHealth
 import config
@@ -402,10 +403,10 @@ class TestOnMessageSkipsPrefixes:
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
+            patch("ai_client.complete", new_callable=AsyncMock) as mock_complete,
         ):
             await bot.on_message(message)
-        mock_create.assert_not_called()
+        mock_complete.assert_not_called()
         message.reply.assert_not_called()
 
     @pytest.mark.asyncio
@@ -416,10 +417,10 @@ class TestOnMessageSkipsPrefixes:
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
+            patch("ai_client.complete", new_callable=AsyncMock) as mock_complete,
         ):
             await bot.on_message(message)
-        mock_create.assert_not_called()
+        mock_complete.assert_not_called()
         message.reply.assert_not_called()
 
 
@@ -443,12 +444,12 @@ class TestCommandMentionDedup:
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=mock_ctx),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
+            patch("ai_client.complete", new_callable=AsyncMock) as mock_complete,
         ):
             await bot.on_message(message)
 
-        # Claude should NOT be called since a command was invoked
-        mock_create.assert_not_called()
+        # AI should NOT be called since a command was invoked
+        mock_complete.assert_not_called()
         message.reply.assert_not_called()
 
 
@@ -524,15 +525,15 @@ class TestChatCircuitBreaker:
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
         with (
-            patch.object(bot, "claude_health", health),
+            patch.object(bot, "_CHAT_HEALTH", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock) as mock_create,
+            patch("ai_client.complete", new_callable=AsyncMock) as mock_complete,
         ):
             await bot.on_message(message)
 
-        mock_create.assert_not_called()
+        mock_complete.assert_not_called()
         reply_text = message.reply.call_args[0][0]
         assert "unreachable" in reply_text.lower()
 
@@ -540,17 +541,15 @@ class TestChatCircuitBreaker:
     async def test_chat_records_success(self) -> None:
         """Successful API call resets circuit breaker."""
         health = ClaudeHealth()
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Hello!")]
 
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
         with (
-            patch.object(bot, "claude_health", health),
+            patch.object(bot, "_CHAT_HEALTH", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch("ai_client.complete", new_callable=AsyncMock, return_value="Hello!"),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
             await bot.on_message(message)
@@ -566,13 +565,14 @@ class TestChatCircuitBreaker:
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
         with (
-            patch.object(bot, "claude_health", health),
+            patch.object(bot, "_CHAT_HEALTH", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(
-                bot.claude.messages, "create",
-                new_callable=AsyncMock, side_effect=anthropic.APITimeoutError(request=None),
+            patch(
+                "ai_client.complete",
+                new_callable=AsyncMock,
+                side_effect=anthropic.APITimeoutError(request=None),
             ),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
@@ -593,13 +593,14 @@ class TestChatCircuitBreaker:
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
         with (
-            patch.object(bot, "claude_health", health),
+            patch.object(bot, "_CHAT_HEALTH", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(
-                bot.claude.messages, "create",
-                new_callable=AsyncMock, side_effect=anthropic.AuthenticationError(
+            patch(
+                "ai_client.complete",
+                new_callable=AsyncMock,
+                side_effect=anthropic.AuthenticationError(
                     message="Invalid key", response=mock_resp, body=None,
                 ),
             ),
@@ -620,17 +621,14 @@ class TestChatCircuitBreaker:
             health.record_failure()
         health._state = "half_open"
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="I'm back!")]
-
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
         with (
-            patch.object(bot, "claude_health", health),
+            patch.object(bot, "_CHAT_HEALTH", health),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch("ai_client.complete", new_callable=AsyncMock, return_value="I'm back!"),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock) as mock_log,
         ):
             await bot.on_message(message)
@@ -655,20 +653,16 @@ class TestIntentDetectionInChat:
     @pytest.mark.asyncio
     async def test_no_channel_reply_when_intent_detected(self) -> None:
         """When [FEATURE] is detected, no reply is sent to the channel."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text="Sure, I can help with that! [FEATURE]"
-        )]
-
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
 
         with (
-            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(bot, "_CHAT_HEALTH", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch("ai_client.complete", new_callable=AsyncMock,
+                  return_value="Sure, I can help with that! [FEATURE]"),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
@@ -680,20 +674,16 @@ class TestIntentDetectionInChat:
     @pytest.mark.asyncio
     async def test_marker_stripped_from_history(self) -> None:
         """[FEATURE] marker is stripped before saving to conversation history."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text="I'll build that for you! [FEATURE]"
-        )]
-
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
 
         with (
-            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(bot, "_CHAT_HEALTH", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch("ai_client.complete", new_callable=AsyncMock,
+                  return_value="I'll build that for you! [FEATURE]"),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock),
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
@@ -708,20 +698,16 @@ class TestIntentDetectionInChat:
     @pytest.mark.asyncio
     async def test_feature_intent_calls_bridge(self) -> None:
         """When [FEATURE] is detected, _start_feature_request is called."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text="That sounds fun! [FEATURE]"
-        )]
-
         bot_user = MagicMock(id=99999)
         message = self._make_message(bot_user)
 
         with (
-            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(bot, "_CHAT_HEALTH", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch("ai_client.complete", new_callable=AsyncMock,
+                  return_value="That sounds fun! [FEATURE]"),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
@@ -737,11 +723,6 @@ class TestIntentDetectionInChat:
     @pytest.mark.asyncio
     async def test_improvement_intent_calls_bridge(self) -> None:
         """When [IMPROVEMENT] is detected, _start_feature_request is called with 'core'."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(
-            text="I can tweak that! [IMPROVEMENT]"
-        )]
-
         bot_user = MagicMock(id=99999)
         message = AsyncMock()
         message.author.bot = False
@@ -752,11 +733,12 @@ class TestIntentDetectionInChat:
         message.mentions = [bot_user]
 
         with (
-            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(bot, "_CHAT_HEALTH", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch("ai_client.complete", new_callable=AsyncMock,
+                  return_value="I can tweak that! [IMPROVEMENT]"),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
@@ -772,9 +754,6 @@ class TestIntentDetectionInChat:
     @pytest.mark.asyncio
     async def test_no_intent_no_bridge_call(self) -> None:
         """When no marker present, _start_feature_request is NOT called."""
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Hello! How can I help?")]
-
         bot_user = MagicMock(id=99999)
         message = AsyncMock()
         message.author.bot = False
@@ -785,11 +764,11 @@ class TestIntentDetectionInChat:
         message.mentions = [bot_user]
 
         with (
-            patch.object(bot, "claude_health", ClaudeHealth()),
+            patch.object(bot, "_CHAT_HEALTH", ClaudeHealth()),
             patch.object(type(bot.bot), "user", new_callable=PropertyMock, return_value=bot_user),
             patch.object(bot.bot, "get_context", new_callable=AsyncMock, return_value=MagicMock(valid=False)),
             patch.object(bot.bot, "invoke", new_callable=AsyncMock),
-            patch.object(bot.claude.messages, "create", new_callable=AsyncMock, return_value=mock_response),
+            patch("ai_client.complete", new_callable=AsyncMock, return_value="Hello! How can I help?"),
             patch.object(bot, "_start_feature_request", new_callable=AsyncMock) as mock_bridge,
             patch.object(bot, "log_to_admin", new_callable=AsyncMock),
         ):
